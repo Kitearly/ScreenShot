@@ -40,7 +40,7 @@ function section(title) {
 // ---------------------------------------------------------------------------
 
 const enc = encodeURIComponent;
-const request = (qs) => new Request(`https://api.example.com/shot?${qs}`);
+const request = (qs) => new Request(`https://api.example.com/?${qs}`);
 const parse = (qs) => parseShot(request(qs));
 
 section("target.ts — URL 规范化");
@@ -171,7 +171,7 @@ await ok("不同尺寸 / 整页得到不同的键", async () => {
 section("target.ts — 来源白名单");
 
 const caller = (origin, referer) =>
-	new Request(`https://api.example.com/shot?url=${enc("https://a.com/")}`, {
+	new Request(`https://api.example.com/?url=${enc("https://a.com/")}`, {
 		headers: { origin: origin ?? "", referer: referer ?? "" },
 	});
 
@@ -270,7 +270,7 @@ const KEY = "k1";
 const TARGET = enc("https://a.com/");
 const inner = (headers) =>
 	new Request(
-		`https://shot.internal/shot?k=${KEY}&t=${TARGET}&w=1280&h=720&q=80&f=0`,
+		`https://shot.internal/?k=${KEY}&t=${TARGET}&w=1280&h=720&q=80&f=0`,
 		headers ? { headers } : undefined,
 	);
 
@@ -359,7 +359,7 @@ await ok("目标挂掉且从没有成功截图时返回 502", async () => {
 		{ SHOTS: fresh, BROWSER: makeBrowser({ down: true, renders: 0 }) },
 	);
 	const res = await failing.fetch(
-		new Request(`https://shot.internal/shot?k=brandnew&t=${TARGET}&w=1280&h=720&q=80&f=0`),
+		new Request(`https://shot.internal/?k=brandnew&t=${TARGET}&w=1280&h=720&q=80&f=0`),
 	);
 	assert.equal(res.status, 502);
 });

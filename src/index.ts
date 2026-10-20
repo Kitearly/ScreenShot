@@ -23,11 +23,8 @@ export default {
 			});
 		}
 
-		const path = new URL(request.url).pathname;
-		// 允许把 Worker 挂在子路径下（如 /api/shot）。
-		if (path !== "/shot" && !path.endsWith("/shot")) {
-			return new Response("not found", { status: 404 });
-		}
+		// 只有一个端点：Worker 挂在哪就调哪，路径本身不参与判断。
+		// 挂在域名根是 "/"，挂在 example.com/api/* 路由上是 "/api/…"，都能直接用。
 
 		if (!isAllowedCaller(request, env.ALLOWED_DOMAINS)) {
 			return new Response("forbidden", { status: 403 });
@@ -40,7 +37,7 @@ export default {
 		const shot = parsed.shot;
 
 		const key = await canonicalKey(shot);
-		const inner = new URL("https://shot.internal/shot");
+		const inner = new URL("https://shot.internal/");
 		inner.searchParams.set("k", key);
 		inner.searchParams.set("t", shot.url);
 		inner.searchParams.set("w", String(shot.width));
@@ -51,7 +48,7 @@ export default {
 		// 转交被缓存的入口：等价的目标地址会落到同一个缓存键上，
 		// 同一缓存键的并发请求由 Workers Cache 合并成一次渲染。
 		return ctx.exports.Shot.fetch(new Request(inner.toString(), request), {
-			cf: { cacheKey: `/shot?k=${key}` },
+			cf: { cacheKey: `/?k=${key}` },
 		});
 	},
 } satisfies ExportedHandler<Env>;

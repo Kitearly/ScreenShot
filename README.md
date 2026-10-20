@@ -3,7 +3,7 @@
 部署在 Cloudflare Workers 上的网页截图 API。基于 [Browser Run](https://developers.cloudflare.com/browser-run/) 的 `/screenshot` 能力，**不需要 API Token，也不需要 Account ID**。
 
 ```
-GET https://你的域名/shot?w=1280&h=720&q=80&full=0&url=https%3A%2F%2Fexample.com
+GET https://你的域名/?w=1280&h=720&q=80&full=0&url=https%3A%2F%2Fexample.com
 → image/jpeg
 ```
 
@@ -23,7 +23,7 @@ GET https://你的域名/shot?w=1280&h=720&q=80&full=0&url=https%3A%2F%2Fexample
 ## 架构
 
 ```
-  GET /shot?...&url=…
+  GET /?w=…&h=…&url=…
         │
         ▼
   ┌───────────────────────────────┐
@@ -124,9 +124,9 @@ npm run deploy
 
 ## API
 
-只有一个端点。
+只有一个端点，挂在哪就调哪 —— 路径不参与判断，只有 `url` 参数决定成不成立。
 
-### `GET /shot`
+### `GET /`
 
 | 参数 | 默认 | 范围 | 说明 |
 | --- | --- | --- | --- |
@@ -139,8 +139,17 @@ npm run deploy
 `url` 必须做 URL 编码：
 
 ```bash
-curl -o shot.jpg "https://你的域名/shot?url=https%3A%2F%2Fexample.com"
+curl -o shot.jpg "https://你的域名/?url=https%3A%2F%2Fexample.com"
 ```
+
+Worker 挂在不同位置时的实际路径：
+
+| 绑定方式 | 请求地址 | Worker 收到的 path |
+| --- | --- | --- |
+| 自定义域名 | `https://api.example.com/?url=…` | `/` |
+| 子域名 | `https://api.example.com/?url=…` | `/` |
+| 路由 `example.com/api/*` | `https://example.com/api/?url=…` | `/api/` |
+| workers.dev | `https://screenshot.workers.dev/?url=…` | `/` |
 
 > **尺寸 / 质量不同 = 不同的缓存条目 = 各自消耗一次渲染。**
 > 固定用一组参数，就能把调用量锁死在「目标数 × 每天 1 次」。
@@ -163,7 +172,6 @@ curl -o shot.jpg "https://你的域名/shot?url=https%3A%2F%2Fexample.com"
 | --- | --- |
 | `400` | 缺 `url`、URL 非法、目标是内网地址 |
 | `403` | 来源不在白名单，或目标解析到内网地址 |
-| `404` | 路径不是 `/shot` |
 | `405` | 方法不是 GET / HEAD |
 | `502` | 渲染失败（且没有可用的旧图） |
 
