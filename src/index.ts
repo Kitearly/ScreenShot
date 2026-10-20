@@ -11,6 +11,7 @@
 
 import { canonicalKey, isAllowedCaller, parseShot, type Env } from "./target";
 import { Shot } from "./shot";
+import { warm } from "./warm";
 
 export { Shot };
 
@@ -50,5 +51,15 @@ export default {
 		return ctx.exports.Shot.fetch(new Request(inner.toString(), request), {
 			cf: { cacheKey: `/?k=${key}` },
 		});
+	},
+
+	/**
+	 * 预热。只在配置了 cron trigger 时才会被调用（见 wrangler.jsonc）。
+	 *
+	 * 每个 tick 只渲染一个目标，所以永远不会撞上「1 次 / 10 秒」的限流；
+	 * 这是唯一能在页面加载之外把十几张图都备好的位置。
+	 */
+	async scheduled(_controller, env) {
+		await warm(env);
 	},
 } satisfies ExportedHandler<Env>;

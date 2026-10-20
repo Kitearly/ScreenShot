@@ -5,6 +5,13 @@
 	"compatibility_date": "2026-10-20",
 	"workers_dev": true,
 
+	// 预热：每 5 分钟挑一个最该刷新的目标重新渲染。
+	// 1 次 / tick 远低于「1 次 / 10 秒」的账号限制，也就不会和页面加载抢额度。
+	// 想停掉预热就把 crons 改成 []（删掉整个 triggers 不会关掉已部署的触发器）。
+	"triggers": {
+		"crons": ["*/5 * * * *"]
+	},
+
 	// Browser Run 绑定：无需 API Token，也无需 Account ID。
 	// 调用方式见 src/shot.ts —— env.BROWSER.quickAction("screenshot", …)
 	"browser": {
