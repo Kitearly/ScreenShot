@@ -7,7 +7,7 @@
 
 /** Worker 运行时绑定与环境变量。 */
 export interface Env {
-	/** Browser Run 绑定（wrangler.toml 里的 `[browser]`）。 */
+	/** Browser Run 绑定（wrangler.jsonc 里的 "browser"）。 */
 	BROWSER: BrowserRun;
 	/** Workers KV 命名空间，持久化截图二进制与元数据。 */
 	SHOTS: KVNamespace;

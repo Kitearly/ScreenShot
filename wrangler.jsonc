@@ -1,0 +1,46 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "screenshot",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-20",
+	"workers_dev": true,
+
+	// Browser Run 绑定：无需 API Token，也无需 Account ID。
+	// 调用方式见 src/shot.ts —— env.BROWSER.quickAction("screenshot", …)
+	"browser": {
+		"binding": "BROWSER"
+	},
+
+	// Workers KV 命名空间：持久化截图二进制与元数据。
+	//
+	// 还没建的话执行下面这条命令，它会自动把真实的 namespace id 写回本文件：
+	//   npx wrangler kv namespace create SHOTS --binding SHOTS --update-config
+	// 然后 git commit + push 即可（namespace id 不是密钥，可以进仓库）。
+	"kv_namespaces": [
+		{
+			"binding": "SHOTS",
+			"id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+		}
+	],
+
+	// Workers Cache：分层缓存 + 并发请求合并 + stale-while-revalidate。
+	"cache": {
+		"enabled": true
+	},
+	"exports": {
+		// 网关入口不缓存（每次请求都要做白名单校验与 URL 规范化）。
+		"default": {
+			"type": "worker",
+			"cache": {
+				"enabled": false
+			}
+		},
+		// 真正出图的那一层才进缓存。
+		"Shot": {
+			"type": "worker",
+			"cache": {
+				"enabled": true
+			}
+		}
+	}
+}

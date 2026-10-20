@@ -6,9 +6,10 @@
 	"scripts": {
 		"dev": "wrangler dev",
 		"deploy": "wrangler deploy",
+		"predeploy": "node scripts/check-config.mjs",
 		"test": "node --experimental-strip-types --import ./test/register.mjs test/shot.test.mjs",
 		"typecheck": "tsc --noEmit",
-		"kv:create": "wrangler kv namespace create SHOTS"
+		"kv:create": "wrangler kv namespace create SHOTS --binding SHOTS --update-config"
 	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^5.20261019.1",

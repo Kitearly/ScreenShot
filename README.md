@@ -64,16 +64,19 @@ npm install
 
 ### 2. 建 KV 命名空间
 
+**一条命令搞定**，它会创建命名空间并把真实的 namespace id 自动写回 `wrangler.jsonc`：
+
 ```bash
-npx wrangler kv namespace create SHOTS
+npx wrangler kv namespace create SHOTS --binding SHOTS --update-config
 ```
 
-把输出的 `id` 填进 `wrangler.toml`：
+> namespace id **不是密钥**，可以安全地提交进仓库。
+> 已经有了的话用 `npx wrangler kv namespace list` 查到 id，手动替换 `wrangler.jsonc` 里的占位符即可。
 
-```toml
-[[kv_namespaces]]
-binding = "SHOTS"
-id = "你的 namespace id"
+改完检查一下：
+
+```bash
+npm run predeploy   # 有占位符会直接报错并给出上面的命令
 ```
 
 ### 3.（可选）限制调用来源
@@ -88,13 +91,34 @@ npx wrangler secret put ALLOWED_DOMAINS
 ### 4. 部署
 
 ```bash
-npx wrangler deploy
+npm run deploy
 ```
+
+用 `npm run deploy` 而不是 `npx wrangler deploy`，是为了让 `predeploy` 检查先跑一遍，
+避免占位符走到 Cloudflare 构建里才失败。
 
 ### 5. 绑定自定义域名（可选）
 
-在 Cloudflare 控制台给这个 Worker 绑一个域名，或在 `wrangler.toml` 里加 `routes`。
+在 Cloudflare 控制台给这个 Worker 绑一个域名，或在 `wrangler.jsonc` 里加 `routes`。
 不绑的话默认走 `*.workers.dev`，也能直接用。
+
+### 用 Git 仓库部署（Cloudflare Workers Builds）
+
+在 Cloudflare 控制台连接这个 Git 仓库后，构建配置这样填：
+
+| 项 | 值 |
+| --- | --- |
+| Build command | `npm install`（或留空用默认的 `npm clean-install`） |
+| **Deploy command** | **`npm run deploy`** |
+| Root directory | 仓库根目录 |
+
+⚠️ **必须先把 `wrangler.jsonc` 里的 KV id 换成真的并提交**，否则构建会失败：
+
+```
+✘ [ERROR] KV namespace 'REPLACE_WITH_YOUR_KV_NAMESPACE_ID' is not valid. [code: 10042]
+```
+
+所以流程是：**建命名空间 → commit（带上真实 id）→ push → 构建自动部署**。
 
 ---
 
@@ -147,7 +171,7 @@ curl -o shot.jpg "https://你的域名/shot?url=https%3A%2F%2Fexample.com"
 
 ## 配置
 
-**绑定**（`wrangler.toml`）
+**绑定**（`wrangler.jsonc`）
 
 | 名称 | 类型 | 说明 |
 | --- | --- | --- |
@@ -245,12 +269,13 @@ Browser Run 的计费单位是**浏览器时长**。
 npx wrangler dev
 ```
 
-`quickAction()` 在本地模式下不可用，需要在 `wrangler.toml` 里临时加：
+`quickAction()` 在本地模式下不可用，需要在 `wrangler.jsonc` 里给 browser 绑定加上 `remote`：
 
-```toml
-[browser]
-binding = "BROWSER"
-remote = true
+```jsonc
+"browser": {
+	"binding": "BROWSER",
+	"remote": true
+}
 ```
 
 然后用 `npx wrangler dev --remote` 运行。
@@ -264,6 +289,8 @@ src/
   index.ts   网关入口 + Shot 入口
   target.ts  配置常量、目标 URL 的解析 / 规范化 / 安全校验
   shot.ts    渲染与持久化
+scripts/
+  check-config.mjs  部署前检查：KV namespace id 不能还是占位符
 test/
   shot.test.mjs  单元测试（直接跑源码，不打包）
 types/
