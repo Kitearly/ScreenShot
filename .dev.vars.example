@@ -1,0 +1,5 @@
+# 允许调用本 API 的域名白名单，逗号分隔；留空表示不限制。
+# 匹配的是 Origin / Referer 的主机名，支持 "example.com"（含子域）与 "*.example.com"。
+# 建议用 secret 写入，避免每次改动都要重新部署：
+#   npx wrangler secret put ALLOWED_DOMAINS
+ALLOWED_DOMAINS=example.com

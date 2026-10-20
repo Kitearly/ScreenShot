@@ -1,1 +1,261 @@
 # ScreenShot
+
+部署在 Cloudflare Workers 上的网页截图 API。基于 [Browser Run](https://developers.cloudflare.com/browser-run/) 的 `/screenshot` 能力，**不需要 API Token，也不需要 Account ID**。
+
+```
+GET https://你的域名/shot?w=1200&h=800&q=80&full=0&url=https%3A%2F%2Fexample.com
+→ image/jpeg
+```
+
+---
+
+## 特点
+
+- **零 secret**：用 `browser` 绑定直接调 `env.BROWSER.quickAction("screenshot", …)`，鉴权由绑定自己处理。
+- **并发合并**：同一个目标地址的并发请求只渲染一次，其余请求等结果。
+- **分层缓存**：Workers Cache（边缘，分层 + 合并 + SWR）→ Workers KV（持久，跨机房、跨驱逐）。
+- **URL 规范化**：等价地址（`?utm_source=…`、参数顺序不同）复用同一张图、同一份配额。
+- **负缓存**：渲染失败的目标 5 分钟内不再重试，不会把配额打光。
+- **SSRF 防护**：拦内网 / 元数据地址 / 非 HTTP(S) 协议 / URL 内嵌凭据。
+
+---
+
+## 架构
+
+```
+  GET /shot?...&url=…
+        │
+        ▼
+  ┌───────────────────────────────┐
+  │ default 入口（网关，不缓存）    │  白名单校验 → 目标规范化 → 算 canonical key
+  └───────────────┬───────────────┘
+                  │  ctx.exports.Shot.fetch(…, { cf: { cacheKey } })
+                  ▼
+  ┌───────────────────────────────┐
+  │ Shot 入口（缓存开启）           │  同一 cacheKey 的并发请求在这里被合并
+  └───────────────┬───────────────┘
+                  │  未命中
+        ┌─────────┴─────────┐
+        ▼                   ▼
+  ┌───────────┐       ┌──────────────┐
+  │ Workers KV│       │ Browser Run  │  Chromium 渲染 → image/jpeg
+  │ (持久层)   │       └──────────────┘
+  └───────────┘
+```
+
+**为什么网关和出图要拆成两个入口？**
+
+Workers Cache 的缓存键只由「路径 + 查询串 + 入口 + Worker 版本」决定，**不含 Referer / Origin**。如果把白名单校验放在被缓存的那一层：
+
+- 未授权的调用方能直接拿到缓存图；
+- 某次合法的 403 会被缓存下来，之后所有人都收到 403。
+
+所以网关不缓存（每次请求都跑），只把校验过的请求转交给被缓存的 `Shot` 入口。
+
+---
+
+## 部署
+
+### 1. 准备
+
+```bash
+npm install
+```
+
+### 2. 建 KV 命名空间
+
+```bash
+npx wrangler kv namespace create SHOTS
+```
+
+把输出的 `id` 填进 `wrangler.toml`：
+
+```toml
+[[kv_namespaces]]
+binding = "SHOTS"
+id = "你的 namespace id"
+```
+
+### 3.（可选）限制调用来源
+
+```bash
+npx wrangler secret put ALLOWED_DOMAINS
+# 例：example.com,*.example.com
+```
+
+留空表示不做限制，任何人都能调用 —— **公开的截图接口很容易被刷额度，建议配置**。
+
+### 4. 部署
+
+```bash
+npx wrangler deploy
+```
+
+### 5. 绑定自定义域名（可选）
+
+在 Cloudflare 控制台给这个 Worker 绑一个域名，或在 `wrangler.toml` 里加 `routes`。
+不绑的话默认走 `*.workers.dev`，也能直接用。
+
+---
+
+## API
+
+只有一个端点。
+
+### `GET /shot`
+
+| 参数 | 默认 | 范围 | 说明 |
+| --- | --- | --- | --- |
+| `w` | `1200` | 320–1920 | 视口宽度 |
+| `h` | `800` | 400–4000 | 视口高度 |
+| `q` | `80` | 40–95 | JPEG 质量 |
+| `full` | `0` | `0` / `1` | `1` = 整页长图 |
+| `url` | **必填** | — | 目标地址（**放在最后**） |
+
+`url` 必须做 URL 编码：
+
+```bash
+curl -o shot.jpg "https://你的域名/shot?url=https%3A%2F%2Fexample.com"
+```
+
+> **尺寸 / 质量不同 = 不同的缓存条目 = 各自消耗一次渲染。**
+> 固定用一组参数，就能把调用量锁死在「目标数 × 每天 1 次」。
+
+### 响应头
+
+| 头 | 含义 |
+| --- | --- |
+| `Cf-Cache-Status` | Cloudflare 边缘缓存状态（`HIT` / `MISS` / `UPDATING` / `STALE`） |
+| `X-Cache` | 本层缓存状态：`KV`（命中持久层）/ `MISS`（新渲染）/ `STALE`（渲染失败，用的旧图） |
+| `X-Screenshot-Age` | 这张图是多久之前生成的（秒） |
+| `X-Browser-Ms-Used` | 本次渲染实际消耗的浏览器时长（毫秒） |
+| `X-Screenshot-Reason` | 仅 `STALE` 时出现，说明为什么退回旧图 |
+| `ETag` | 内容指纹，配合 `If-None-Match` 可返回 304 |
+| `Cache-Tag` | `shot` 与 `shot:<key>`，可用于按标签清缓存 |
+
+### 错误
+
+| 状态码 | 含义 |
+| --- | --- |
+| `400` | 缺 `url`、URL 非法、目标是内网地址 |
+| `403` | 来源不在白名单，或目标解析到内网地址 |
+| `404` | 路径不是 `/shot` |
+| `405` | 方法不是 GET / HEAD |
+| `502` | 渲染失败（且没有可用的旧图） |
+
+---
+
+## 配置
+
+**绑定**（`wrangler.toml`）
+
+| 名称 | 类型 | 说明 |
+| --- | --- | --- |
+| `BROWSER` | Browser Run | 必需。无 Token，绑定自带鉴权 |
+| `SHOTS` | Workers KV | 必需。存截图二进制与元数据 |
+
+**环境变量**
+
+| 名称 | 说明 |
+| --- | --- |
+| `ALLOWED_DOMAINS` | 可选。允许调用方的域名白名单，逗号分隔。留空 = 不限制 |
+
+**代码常量**（改这些不用动结构）
+
+| 位置 | 常量 | 默认 | 作用 |
+| --- | --- | --- | --- |
+| `src/target.ts` | `DEFAULT_WIDTH` / `DEFAULT_HEIGHT` / `DEFAULT_QUALITY` | 1200 / 800 / 80 | 默认视口与画质 |
+| `src/shot.ts` | `TTL` | 86400 | 截图有效期，同时是边缘 `max-age` 与 KV 过期时间 |
+| `src/shot.ts` | `SWR` | 86400 | 过期后先返回旧图、后台刷新的窗口 |
+| `src/shot.ts` | `SIE` | 604800 | 刷新失败时继续提供旧图的窗口 |
+| `src/shot.ts` | `NEG_TTL` | 300 | 渲染失败后的负缓存时长 |
+| `src/shot.ts` | `WAIT_UNTIL` | `networkidle2` | 页面加载完成的判定 |
+| `src/shot.ts` | `GOTO_TIMEOUT` / `ACTION_TIMEOUT` | 20000 / 10000 | 加载与截图的超时（毫秒） |
+| `src/shot.ts` | `BROWSER_CACHE_TTL` | 0 | Cloudflare 侧浏览器缓存，见下方说明 |
+
+> `BROWSER_CACHE_TTL` 默认关掉了。它能省下「本地缓存被清空」那一次渲染，
+> 但官方没有公开它的缓存键是否包含视口 / 质量等参数，
+> 万一不含就可能拿到尺寸不对的图。确认过行为后可以调大（最大 86400）。
+
+---
+
+## 配额
+
+Browser Run 的计费单位是**浏览器时长**。
+
+| 计划 | 额度 | 限流 |
+| --- | --- | --- |
+| Workers Free | 10 分钟 / 天 | Quick Action **1 次 / 10 秒** |
+| Workers Paid | 10 小时 / 月，超出 $0.09 / 小时 | Quick Action 30 次 / 秒 |
+
+一次 1200×800 的截图大约消耗 2 秒浏览器时长，于是：
+
+- Free 档的硬上限约 **300 次 / 天**；
+- `TTL=86400` + 20 个固定目标 ⇒ 约 **20 次 / 天**，与访问量完全无关；
+- 失败、超时的调用不计入浏览器时长，但仍会占用限流名额。
+
+**降低消耗的几种做法**
+
+1. 固定一组 `w` / `h` / `q`，别让缓存键发散；
+2. 调大 `TTL`（代价是内容更新变慢）；
+3. 白名单收紧，别让接口被公开刷。
+
+---
+
+## 安全
+
+- **来源限制**：按 `Origin` / `Referer` 的**主机名**匹配白名单，支持 `example.com`（含子域）与 `*.example.com`。
+  比字符串 `includes` 严格，`https://evil.com/?x=example.com` 不会通过。
+  仍然可以伪造请求头，只适合个人 / 小站点自用。
+- **SSRF**：
+  - 只允许 `http:` / `https:`，拒绝 URL 内嵌凭据；
+  - 拒绝 `localhost` / `*.local` / `*.internal` / `metadata.google.internal` 等保留域名；
+  - 拒绝私网与保留网段的 IP 字面量（`127/8`、`10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`::1`、`fc00::/7` …）；
+  - 渲染前通过 DoH 解析一次域名，解析到私网地址则拒绝。
+    这一步挡不住 DNS 重绑定（浏览器会重新解析），属于尽力而为。
+
+---
+
+## 本地开发
+
+```bash
+npx wrangler dev
+```
+
+`quickAction()` 在本地模式下不可用，需要在 `wrangler.toml` 里临时加：
+
+```toml
+[browser]
+binding = "BROWSER"
+remote = true
+```
+
+然后用 `npx wrangler dev --remote` 运行。
+
+---
+
+## 目录
+
+```
+src/
+  index.ts   网关入口 + Shot 入口
+  target.ts  配置常量、目标 URL 的解析 / 规范化 / 安全校验
+  shot.ts    渲染与持久化
+types/
+  global.d.ts  让 ctx.exports.Shot 拥有完整类型
+```
+
+## 校验
+
+```bash
+npm run typecheck
+```
+
+---
+
+## 参考
+
+- [Browser Run / Quick Actions](https://developers.cloudflare.com/browser-run/quick-actions/)
+- [Browser Run 限制与计费](https://developers.cloudflare.com/browser-run/limits/) · [计费](https://developers.cloudflare.com/browser-run/pricing/)
+- [Workers Cache](https://developers.cloudflare.com/workers/cache/)
+- [Workers KV 限制](https://developers.cloudflare.com/kv/platform/limits/)
