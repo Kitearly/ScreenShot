@@ -20,9 +20,9 @@ export interface Env {
 // ---------------------------------------------------------------------------
 
 /** 默认视口宽度。 */
-export const DEFAULT_WIDTH = 1200;
+export const DEFAULT_WIDTH = 1280;
 /** 默认视口高度。 */
-export const DEFAULT_HEIGHT = 800;
+export const DEFAULT_HEIGHT = 720;
 /** 默认 JPEG 质量。 */
 export const DEFAULT_QUALITY = 80;
 

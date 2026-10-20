@@ -3,7 +3,7 @@
 部署在 Cloudflare Workers 上的网页截图 API。基于 [Browser Run](https://developers.cloudflare.com/browser-run/) 的 `/screenshot` 能力，**不需要 API Token，也不需要 Account ID**。
 
 ```
-GET https://你的域名/shot?w=1200&h=800&q=80&full=0&url=https%3A%2F%2Fexample.com
+GET https://你的域名/shot?w=1280&h=720&q=80&full=0&url=https%3A%2F%2Fexample.com
 → image/jpeg
 ```
 
@@ -130,8 +130,8 @@ npm run deploy
 
 | 参数 | 默认 | 范围 | 说明 |
 | --- | --- | --- | --- |
-| `w` | `1200` | 320–1920 | 视口宽度 |
-| `h` | `800` | 400–4000 | 视口高度 |
+| `w` | `1280` | 320–1920 | 视口宽度 |
+| `h` | `720` | 400–4000 | 视口高度 |
 | `q` | `80` | 40–95 | JPEG 质量 |
 | `full` | `0` | `0` / `1` | `1` = 整页长图 |
 | `url` | **必填** | — | 目标地址（**放在最后**） |
@@ -188,7 +188,7 @@ curl -o shot.jpg "https://你的域名/shot?url=https%3A%2F%2Fexample.com"
 
 | 位置 | 常量 | 默认 | 作用 |
 | --- | --- | --- | --- |
-| `src/target.ts` | `DEFAULT_WIDTH` / `DEFAULT_HEIGHT` / `DEFAULT_QUALITY` | 1200 / 800 / 80 | 默认视口与画质 |
+| `src/target.ts` | `DEFAULT_WIDTH` / `DEFAULT_HEIGHT` / `DEFAULT_QUALITY` | 1280 / 720 / 80 | 默认视口与画质 |
 | `src/shot.ts` | `TTL` | 86400 | 截图有效期，同时是边缘 `max-age` 与「新鲜度」的判定依据 |
 | `src/shot.ts` | `KEEP_TTL` | 2592000 | 截图在 KV 里的保留时长（30 天，KV 上限）。与 `TTL` 解耦，保证目标挂掉时还能回退到最后一次成功的截图 |
 | `src/shot.ts` | `SWR` | 86400 | 过期后先返回旧图、后台刷新的窗口 |
@@ -221,7 +221,7 @@ curl -o shot.jpg "https://你的域名/shot?url=https%3A%2F%2Fexample.com"
 旧图的边缘 `max-age` 只有 60 秒，目标恢复后很快就会重新出图。
 
 > 保留期 30 天意味着 KV 里会一直躺着每个目标的最后一张图。
-> 目标越多占用越大（一张 1200×800 的 JPEG 约 80–200 KB），
+> 目标越多占用越大（一张 1280×720 的 JPEG 约 80–200 KB），
 > Free 档 1 GB 够放几千张。
 
 ---
@@ -235,7 +235,7 @@ Browser Run 的计费单位是**浏览器时长**。
 | Workers Free | 10 分钟 / 天 | Quick Action **1 次 / 10 秒** |
 | Workers Paid | 10 小时 / 月，超出 $0.09 / 小时 | Quick Action 30 次 / 秒 |
 
-一次 1200×800 的截图大约消耗 2 秒浏览器时长，于是：
+一次 1280×720 的截图大约消耗 2 秒浏览器时长，于是：
 
 - Free 档的硬上限约 **300 次 / 天**；
 - `TTL=86400` + 20 个固定目标 ⇒ 约 **20 次 / 天**，与访问量完全无关；

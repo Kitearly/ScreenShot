@@ -143,8 +143,8 @@ await ok("参数越界收敛", () => {
 await ok("参数缺省取默认值", () => {
 	const result = parse(`url=${enc("https://a.com/")}`);
 	assert.ok(result.ok);
-	assert.equal(result.shot.width, 1200);
-	assert.equal(result.shot.height, 800);
+	assert.equal(result.shot.width, 1280);
+	assert.equal(result.shot.height, 720);
 	assert.equal(result.shot.quality, 80);
 	assert.equal(result.shot.fullPage, false);
 });
@@ -270,7 +270,7 @@ const KEY = "k1";
 const TARGET = enc("https://a.com/");
 const inner = (headers) =>
 	new Request(
-		`https://shot.internal/shot?k=${KEY}&t=${TARGET}&w=1200&h=800&q=80&f=0`,
+		`https://shot.internal/shot?k=${KEY}&t=${TARGET}&w=1280&h=720&q=80&f=0`,
 		headers ? { headers } : undefined,
 	);
 
@@ -305,8 +305,8 @@ await ok("渲染参数正确（jpeg + 视口 + networkidle2 + 屏蔽媒体）", 
 	const options = browserState.lastOptions;
 	assert.equal(options.screenshotOptions.type, "jpeg");
 	assert.equal(options.screenshotOptions.quality, 80);
-	assert.equal(options.viewport.width, 1200);
-	assert.equal(options.viewport.height, 800);
+	assert.equal(options.viewport.width, 1280);
+	assert.equal(options.viewport.height, 720);
 	assert.equal(options.gotoOptions.waitUntil, "networkidle2");
 	assert.deepEqual(options.rejectResourceTypes, ["media"]);
 });
@@ -359,7 +359,7 @@ await ok("目标挂掉且从没有成功截图时返回 502", async () => {
 		{ SHOTS: fresh, BROWSER: makeBrowser({ down: true, renders: 0 }) },
 	);
 	const res = await failing.fetch(
-		new Request(`https://shot.internal/shot?k=brandnew&t=${TARGET}&w=1200&h=800&q=80&f=0`),
+		new Request(`https://shot.internal/shot?k=brandnew&t=${TARGET}&w=1280&h=720&q=80&f=0`),
 	);
 	assert.equal(res.status, 502);
 });
