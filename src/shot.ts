@@ -19,8 +19,16 @@ import {
 // 配置
 // ---------------------------------------------------------------------------
 
-/** 截图有效期（秒）。同时作为边缘缓存 max-age 与 KV 过期时间。 */
+/** 截图有效期（秒）。同时作为边缘缓存 max-age 与「新鲜度」的判定依据。 */
 const TTL = 86_400;
+/**
+ * 截图在 KV 里的保留时长（秒，KV 上限 30 天）。
+ *
+ * 与 TTL 解耦：TTL 决定「这份截图算不算新鲜」，KEEP_TTL 决定「这份截图留多久」。
+ * 留得久是为了在目标站挂掉时，仍能回退到**最后一次成功的截图** ——
+ * 哪怕那份截图已经是 20 天前生成的。
+ */
+const KEEP_TTL = 2_592_000;
 /** stale-while-revalidate 窗口：过期后先返回旧图，后台刷新。 */
 const SWR = 86_400;
 /** stale-if-error 窗口：刷新失败时继续提供旧图。 */
@@ -137,7 +145,7 @@ export class Shot extends WorkerEntrypoint<Env> {
 
 		ctx.waitUntil(
 			Promise.all([
-				env.SHOTS.put(shotKey, bytes, { expirationTtl: TTL }),
+				env.SHOTS.put(shotKey, bytes, { expirationTtl: KEEP_TTL }),
 				env.SHOTS.put(
 					metaKey,
 					JSON.stringify({
@@ -148,7 +156,7 @@ export class Shot extends WorkerEntrypoint<Env> {
 						q: quality,
 						f: fullPage ? 1 : 0,
 					} satisfies ShotMeta),
-					{ expirationTtl: TTL },
+					{ expirationTtl: KEEP_TTL },
 				),
 			]),
 		);

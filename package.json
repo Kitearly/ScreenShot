@@ -6,6 +6,7 @@
 	"scripts": {
 		"dev": "wrangler dev",
 		"deploy": "wrangler deploy",
+		"test": "node --experimental-strip-types --import ./test/register.mjs test/shot.test.mjs",
 		"typecheck": "tsc --noEmit",
 		"kv:create": "wrangler kv namespace create SHOTS"
 	},

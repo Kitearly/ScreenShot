@@ -165,7 +165,8 @@ curl -o shot.jpg "https://你的域名/shot?url=https%3A%2F%2Fexample.com"
 | 位置 | 常量 | 默认 | 作用 |
 | --- | --- | --- | --- |
 | `src/target.ts` | `DEFAULT_WIDTH` / `DEFAULT_HEIGHT` / `DEFAULT_QUALITY` | 1200 / 800 / 80 | 默认视口与画质 |
-| `src/shot.ts` | `TTL` | 86400 | 截图有效期，同时是边缘 `max-age` 与 KV 过期时间 |
+| `src/shot.ts` | `TTL` | 86400 | 截图有效期，同时是边缘 `max-age` 与「新鲜度」的判定依据 |
+| `src/shot.ts` | `KEEP_TTL` | 2592000 | 截图在 KV 里的保留时长（30 天，KV 上限）。与 `TTL` 解耦，保证目标挂掉时还能回退到最后一次成功的截图 |
 | `src/shot.ts` | `SWR` | 86400 | 过期后先返回旧图、后台刷新的窗口 |
 | `src/shot.ts` | `SIE` | 604800 | 刷新失败时继续提供旧图的窗口 |
 | `src/shot.ts` | `NEG_TTL` | 300 | 渲染失败后的负缓存时长 |
@@ -176,6 +177,28 @@ curl -o shot.jpg "https://你的域名/shot?url=https%3A%2F%2Fexample.com"
 > `BROWSER_CACHE_TTL` 默认关掉了。它能省下「本地缓存被清空」那一次渲染，
 > 但官方没有公开它的缓存键是否包含视口 / 质量等参数，
 > 万一不含就可能拿到尺寸不对的图。确认过行为后可以调大（最大 86400）。
+
+---
+
+## 目标站挂掉时的行为
+
+截图在 KV 里保留 **30 天**（`KEEP_TTL`），但「新鲜度」只看 `meta.t` 距今多久（`TTL`）。
+这两者解耦，就是为了让**最后一次成功的截图**活得比新鲜期长得多。
+
+| 场景 | 返回 | `X-Cache` |
+| --- | --- | --- |
+| 边缘缓存命中 | 边缘副本 | —（`Cf-Cache-Status: HIT`） |
+| 边缘未命中，但 KV 里的图还新鲜（< 24h） | KV 副本 | `KV` |
+| 边缘未命中、图已过期，**渲染成功** | 新图 | `MISS` |
+| 渲染失败，但 KV 里还留着旧图 | **回退到旧图**（`X-Screenshot-Age` 告诉你它有多旧） | `STALE` |
+| 渲染失败，且从没有过成功的截图 | `502` | — |
+
+失败会写一条 5 分钟的负缓存（`NEG_TTL`），期间不再重试渲染；
+旧图的边缘 `max-age` 只有 60 秒，目标恢复后很快就会重新出图。
+
+> 保留期 30 天意味着 KV 里会一直躺着每个目标的最后一张图。
+> 目标越多占用越大（一张 1200×800 的 JPEG 约 80–200 KB），
+> Free 档 1 GB 够放几千张。
 
 ---
 
@@ -241,6 +264,8 @@ src/
   index.ts   网关入口 + Shot 入口
   target.ts  配置常量、目标 URL 的解析 / 规范化 / 安全校验
   shot.ts    渲染与持久化
+test/
+  shot.test.mjs  单元测试（直接跑源码，不打包）
 types/
   global.d.ts  让 ctx.exports.Shot 拥有完整类型
 ```
@@ -248,8 +273,12 @@ types/
 ## 校验
 
 ```bash
-npm run typecheck
+npm run typecheck   # tsc --noEmit
+npm test            # 31 项断言：URL 规范化、SSRF、参数、缓存键、白名单、渲染与回退
 ```
+
+测试用 Node 原生的类型剥离直接跑 `src/` 源码，不经过打包，
+所以断言的就是线上要跑的那份代码。
 
 ---
 
