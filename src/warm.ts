@@ -1,85 +1,106 @@
 /**
- * 预热：让友链页面要的那批截图一直是热的。
+ * 后台刷新。
  *
- * 为什么要单独用一个后台任务：账号级限制是「Quick Action 1 次 / 10 秒」，
- * 而一次页面加载会并发请求十几张图 —— 请求路径上无论如何都不可能在 110 秒内
- * 把它们渲染完。真正能解决这件事的位置只有后台：每个 tick 只渲染**一个**
- * 最该刷新的目标，就永远不会撞到限流。
+ * 请求路径上能做的已经做完了：过期图先给旧图、刷新放后台。
+ * 这个定时任务负责剩下的两件事：
  *
- * 队列不需要配置：任何一次请求（渲染成功、或者撞上限流）都会把目标登记进
- * `warm:v1:*`，此后它就一直被这里保持新鲜。不再需要的目标要手动删掉，否则会一直被刷新。
+ * 1. 补 pending —— 第一次并发加载时撞了限流、只写下了头部没写出图的那些目标，
+ *    由这里逐个补上，不用等下一次有人访问。
+ * 2. 刷新到期的图 —— 到期时间（`header.e`）是随机的，所以每个 host 过期的时间
+ *    都不同，这里每次只处理一个，永远不会撞上「1 次 / 10 秒」。
+ *
+ * 每个 tick 只渲染一个目标，节奏就是 1 次 / 5 分钟。
  */
 
 import {
-	WARM_PREFIX,
 	capture,
+	makeHeader,
 	noteFailure,
-	register,
+	readStored,
 	store,
-	type WarmRecord,
+	touch,
+	type ShotHeader,
 } from "./shot";
 import { assertPublicHost, type Env } from "./target";
 
-/** 失败后的基础退避（毫秒）。 */
-const RETRY_MS = 600_000;
-/** 退避上限（毫秒），避免一个永久挂掉的目标把额度吃光。 */
-const RETRY_MAX_MS = 21_600_000;
-/** 一次 list 最多看多少条。十几张图远远够用。 */
-const LIMIT = 100;
+/** 失败后的基础退避（秒）。 */
+const RETRY_SECONDS = 600;
+/** 退避上限（秒），避免一个永久挂掉的目标把额度吃光。 */
+const RETRY_MAX_SECONDS = 21_600;
+/** 一次最多看多少条记录。 */
+const LIMIT = 200;
 
 export async function warm(env: Env): Promise<void> {
-	const list = await env.SHOTS.list({ prefix: WARM_PREFIX, limit: LIMIT });
+	const list = await env.SHOTS.list({ prefix: "shot:v1:", limit: LIMIT });
 	if (list.keys.length === 0) {
 		return;
 	}
 
-	const now = Date.now();
-	const entries = await Promise.all(
-		list.keys.map(async ({ name }) => {
-			const record = await env.SHOTS.get<WarmRecord>(name, "json");
-			return record ? { key: name.slice(WARM_PREFIX.length), record } : null;
-		}),
-	);
+	const now = Math.floor(Date.now() / 1000);
+	const due: Array<{ key: string; header: ShotHeader }> = [];
 
-	// 一次只处理一个 —— 这就是不超限的全部秘诀。
-	const next = entries
-		.filter(
-			(entry): entry is { key: string; record: WarmRecord } =>
-				entry !== null && entry.record.due <= now,
-		)
-		.sort((a, b) => a.record.due - b.record.due)[0];
-
-	if (!next) {
-		return; // 没有到期的，这一轮什么都不做
+	for (const { name } of list.keys) {
+		const stored = await readStored(env, name);
+		if (!stored) continue;
+		// 没到期，或者还在退避期里，都不动。
+		if (stored.header.e > now || stored.header.n > now) continue;
+		if (!stored.header.u) continue;
+		due.push({ key: name, header: stored.header });
 	}
 
-	const { key, record } = next;
+	if (due.length === 0) {
+		return;
+	}
 
-	const guard = await assertPublicHost(record.url);
+	// pending（还没出过图）优先，其次是最早到期的。
+	due.sort((a, b) => {
+		if (a.header.t === 0) return b.header.t === 0 ? 0 : -1;
+		if (b.header.t === 0) return 1;
+		return a.header.e - b.header.e;
+	});
+
+	const next = due[0];
+	const spec = {
+		url: next.header.u,
+		width: next.header.w,
+		height: next.header.h,
+		quality: next.header.q,
+		fullPage: next.header.f === 1,
+	};
+
+	const guard = await assertPublicHost(spec.url);
 	if (!guard.ok) {
-		return retry(env, key, record, now);
+		return backoff(env, next.key, next.header);
 	}
 
-	const result = await capture(env, record);
+	const result = await capture(env, spec);
 	if (!result.ok) {
 		if (!result.rateLimited) {
-			await noteFailure(env, key, result.reason);
+			await noteFailure(env, next.key, result.reason);
 		}
-		return retry(env, key, record, now);
+		return backoff(env, next.key, next.header);
 	}
 
-	// store() 会顺手把预热记录刷新到下一个 due，并把失败次数清零。
-	await store(env, key, record, result.bytes, now);
+	await store(env, next.key, makeHeader(spec, Date.now()), result.bytes);
 }
 
-/** 失败退避：10 分钟起，逐次翻倍，最长 6 小时。 */
-async function retry(
+/** 失败后退避：10 分钟起步，逐次翻倍，最长 6 小时。 */
+async function backoff(
 	env: Env,
 	key: string,
-	record: WarmRecord,
-	now: number,
+	header: ShotHeader,
 ): Promise<void> {
-	const tries = (record.tries ?? 0) + 1;
-	const backoff = Math.min(RETRY_MAX_MS, RETRY_MS * 2 ** (tries - 1));
-	await register(env, key, record, now + backoff, tries);
+	const tries = header.y + 1;
+	const delay = Math.min(RETRY_MAX_SECONDS, RETRY_SECONDS * 2 ** (tries - 1));
+	const stored = await readStored(env, key);
+	await touch(
+		env,
+		key,
+		{
+			...header,
+			n: Math.floor(Date.now() / 1000) + delay,
+			y: tries,
+		},
+		stored?.bytes ?? null,
+	);
 }

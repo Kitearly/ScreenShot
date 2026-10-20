@@ -397,20 +397,12 @@ function parseIPv6(host: string): number[] | null {
  * 计算截图的规范键：所有会影响画面的参数参与哈希。
  * 键相同即视为同一张图，可以直接复用缓存、跳过渲染。
  */
-export async function canonicalKey(shot: ShotRequest): Promise<string> {
-	const material = [
-		"v1",
-		shot.url,
-		`${shot.width}x${shot.height}`,
-		`q${shot.quality}`,
-		shot.fullPage ? "full" : "viewport",
-	].join("\n");
-	const digest = await crypto.subtle.digest(
-		"SHA-256",
-		new TextEncoder().encode(material),
-	);
-	return [...new Uint8Array(digest)]
-		.map((byte) => byte.toString(16).padStart(2, "0"))
-		.join("")
-		.slice(0, 32);
+/**
+ * 缓存键：只用 host。
+ *
+ * 一个 host 一份图 —— 同一个站点的不同页面、不同尺寸共用一份。
+ * 既省存储，也天然避免了「同一个站被当成 N 个目标」把配额打爆。
+ */
+export function cacheHost(url: string): string {
+	return new URL(url).hostname.toLowerCase();
 }

@@ -2,14 +2,14 @@
  * 入口。
  *
  * default 入口是网关：每次请求都会跑，负责白名单校验、目标规范化、
- * 计算 canonical key，然后把请求转交给被缓存的 Shot 入口。
+ * 把请求转交给被缓存的 Shot 入口。
  *
  * 这样拆分是必须的 —— Workers Cache 的缓存键不含 Referer / Origin，
  * 校验若放在被缓存的那一层，未授权的调用方能拿到缓存图，
  * 合法的 403 也会被缓存下来发给所有人。
  */
 
-import { canonicalKey, isAllowedCaller, parseShot, type Env } from "./target";
+import { cacheHost, isAllowedCaller, parseShot, type Env } from "./target";
 import { Shot } from "./shot";
 import { warm } from "./warm";
 
@@ -37,27 +37,28 @@ export default {
 		}
 		const shot = parsed.shot;
 
-		const key = await canonicalKey(shot);
+		// 缓存键只用 host：同一个站点的不同页面、不同尺寸共用一份图。
+		const host = cacheHost(shot.url);
+
 		const inner = new URL("https://shot.internal/");
-		inner.searchParams.set("k", key);
+		inner.searchParams.set("host", host);
 		inner.searchParams.set("t", shot.url);
 		inner.searchParams.set("w", String(shot.width));
 		inner.searchParams.set("h", String(shot.height));
 		inner.searchParams.set("q", String(shot.quality));
 		inner.searchParams.set("f", shot.fullPage ? "1" : "0");
 
-		// 转交被缓存的入口：等价的目标地址会落到同一个缓存键上，
-		// 同一缓存键的并发请求由 Workers Cache 合并成一次渲染。
+		// 转交被缓存的入口：同一个 host 的并发请求会落到同一个缓存键上，
+		// 由 Workers Cache 合并成一次渲染。
 		return ctx.exports.Shot.fetch(new Request(inner.toString(), request), {
-			cf: { cacheKey: `/?k=${key}` },
+			cf: { cacheKey: `/?host=${host}` },
 		});
 	},
 
 	/**
-	 * 预热。只在配置了 cron trigger 时才会被调用（见 wrangler.jsonc）。
+	 * 后台刷新。只在配置了 cron trigger 时才会被调用（见 wrangler.jsonc）。
 	 *
-	 * 每个 tick 只渲染一个目标，所以永远不会撞上「1 次 / 10 秒」的限流；
-	 * 这是唯一能在页面加载之外把十几张图都备好的位置。
+	 * 每个 tick 只渲染一个目标，所以永远不会撞上「1 次 / 10 秒」的限流。
 	 */
 	async scheduled(_controller, env) {
 		await warm(env);

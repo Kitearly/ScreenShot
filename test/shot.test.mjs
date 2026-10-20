@@ -6,14 +6,20 @@
 
 import assert from "node:assert/strict";
 import {
-	canonicalKey,
+	cacheHost,
 	isAllowedCaller,
 	isPrivateIPv4,
 	isPrivateIPv6,
 	normalizeTarget,
 	parseShot,
 } from "../src/target.ts";
-import { Shot, ttlFor } from "../src/shot.ts";
+import {
+	Shot,
+	decode,
+	encode,
+	makeHeader,
+	randomUntil,
+} from "../src/shot.ts";
 import { warm } from "../src/warm.ts";
 
 // ---------------------------------------------------------------------------
@@ -152,21 +158,20 @@ await ok("参数缺省取默认值", () => {
 
 section("target.ts — 缓存键");
 
-await ok("等价 URL 得到同一个键", async () => {
-	const a = parse(`url=${enc("https://a.com/?utm_source=x&id=1")}`);
-	const b = parse(`url=${enc("https://a.com/?id=1")}`);
-	assert.ok(a.ok && b.ok);
-	assert.equal(a.shot.url, b.shot.url);
-	assert.equal(await canonicalKey(a.shot), await canonicalKey(b.shot));
+await ok("缓存键就是 host", () => {
+	assert.equal(cacheHost("https://Example.COM/blog?id=1"), "example.com");
+	assert.equal(cacheHost("https://example.com:8443/x"), "example.com");
 });
 
-await ok("不同尺寸 / 整页得到不同的键", async () => {
-	const base = parse(`url=${enc("https://a.com/")}`);
-	const small = parse(`url=${enc("https://a.com/")}&w=800`);
-	const full = parse(`url=${enc("https://a.com/")}&full=1`);
-	assert.ok(base.ok && small.ok && full.ok);
-	assert.notEqual(await canonicalKey(base.shot), await canonicalKey(small.shot));
-	assert.notEqual(await canonicalKey(base.shot), await canonicalKey(full.shot));
+await ok("同一个 host 的不同页面共用一份图", () => {
+	assert.equal(
+		cacheHost("https://a.com/blog"),
+		cacheHost("https://a.com/about"),
+	);
+});
+
+await ok("不同 host 得到不同的键", () => {
+	assert.notEqual(cacheHost("https://a.com/"), cacheHost("https://b.com/"));
 });
 
 section("target.ts — 来源白名单");
@@ -206,7 +211,6 @@ await ok("referer 也能通过", () => {
 		true,
 	);
 });
-
 
 // ---------------------------------------------------------------------------
 // shot.ts
@@ -260,6 +264,7 @@ function makeBrowser(state) {
 			assert.equal(action, "screenshot");
 			state.renders++;
 			state.lastOptions = options;
+			state.lastUrl = options.url;
 			if (state.rateLimit) {
 				return new Response("rate limited", { status: 429 });
 			}
@@ -292,17 +297,24 @@ function makeContext() {
 	};
 }
 
-const browserState = { down: false, rateLimit: false, renders: 0, lastOptions: null };
+const browserState = {
+	down: false,
+	rateLimit: false,
+	renders: 0,
+	lastOptions: null,
+	lastUrl: null,
+};
 const kv = makeKV();
 const env = { SHOTS: kv, BROWSER: makeBrowser(browserState) };
 const testCtx = makeContext();
 const shot = new Shot({ waitUntil: testCtx.waitUntil }, env);
 
-const KEY = "k1";
+const HOST = "a.com";
 const TARGET = enc("https://a.com/");
-const inner = (headers, key = KEY) =>
+const KEY = `shot:v1:${HOST}`;
+const inner = (headers, host = HOST, target = TARGET) =>
 	new Request(
-		`https://shot.internal/?k=${key}&t=${TARGET}&w=1280&h=720&q=80&f=0`,
+		`https://shot.internal/?host=${host}&t=${target}&w=1280&h=720&q=80&f=0`,
 		headers ? { headers } : undefined,
 	);
 
@@ -316,12 +328,19 @@ const call = async (req = inner(), instance = shot) => {
 	return { status: res.status, headers: res.headers, body };
 };
 
-const ageMeta = (days, target = `meta:v1:${KEY}`) => {
-	const entry = kv.store.get(target);
-	entry.text = JSON.stringify({
-		...JSON.parse(entry.text),
-		t: Date.now() - days * 86400000,
-	});
+/** 读出 KV 里存的头部。 */
+const headerOf = (key = KEY) => {
+	const entry = kv.store.get(key);
+	if (!entry) return null;
+	return decode(entry.bytes.buffer.slice(0)).header;
+};
+
+/** 把某条记录改成已过期 / 未到期。 */
+const setExpiry = (seconds, key = KEY) => {
+	const entry = kv.store.get(key);
+	const stored = decode(entry.bytes.buffer.slice(0));
+	const header = { ...stored.header, e: Math.floor(Date.now() / 1000) + seconds };
+	entry.bytes = encode(header, stored.bytes);
 };
 
 await ok("首次请求触发渲染并返回新图", async () => {
@@ -343,37 +362,68 @@ await ok("渲染参数正确（jpeg + 视口 + networkidle2 + 屏蔽媒体）", 
 	assert.deepEqual(options.rejectResourceTypes, ["media"]);
 });
 
-await ok("图片、元数据、预热记录都写进 KV", () => {
-	assert.ok(kv.store.has(`shot:v1:${KEY}`));
-	assert.ok(kv.store.has(`meta:v1:${KEY}`));
-	assert.ok(kv.store.has(`warm:v1:${KEY}`));
+await ok("键就是 host，一个 host 只有一条记录", () => {
+	assert.ok(kv.store.has(KEY));
+	assert.equal(kv.store.size, 1, "不应该有第二份");
 });
 
-await ok("KV 保留 30 天，与 24 小时的新鲜期解耦", () => {
-	const entry = kv.store.get(`shot:v1:${KEY}`);
+await ok("头部和图片存在同一个 KV 值里", () => {
+	const header = headerOf();
+	assert.equal(header.u, "https://a.com/");
+	assert.equal(header.w, 1280);
+	assert.equal(header.h, 720);
+	assert.equal(header.q, 80);
+	assert.ok(
+		Math.abs(header.t - Date.now() / 1000) < 5,
+		`生成时间应该就是刚才，实际 ${header.t}`,
+	);
+});
+
+await ok("KV 保留 30 天，和有效期解耦", () => {
+	const entry = kv.store.get(KEY);
 	const days = (entry.expiresAt - Date.now()) / 86400000;
 	assert.ok(days > 29 && days <= 30, `实际 ${days} 天`);
 });
 
-await ok("预热记录提前 30 分钟到期，早于边缘缓存失效", () => {
-	const record = JSON.parse(kv.store.get(`warm:v1:${KEY}`).text);
-	const lead = (record.due - Date.now()) / 1000;
-	const ttl = ttlFor(KEY);
-	assert.ok(
-		Math.abs(lead - (ttl - 1800)) < 5,
-		`due 应落在 ttl-1800，实际 ${lead}s`,
-	);
+await ok("有效期是随机的，落在 48~96 小时之间", () => {
+	const now = Date.now();
+	for (let i = 0; i < 200; i++) {
+		const until = randomUntil(now);
+		const hours = (until - now / 1000) / 3600;
+		assert.ok(hours >= 48 && hours <= 96, `实际 ${hours} 小时`);
+	}
 });
 
-await ok("第二次请求命中 KV，不再渲染", async () => {
+await ok("同一个 host 连续刷新，到期时间会换位置", () => {
+	const seen = new Set();
+	for (let i = 0; i < 50; i++) {
+		seen.add(randomUntil(Date.now()));
+	}
+	assert.ok(seen.size > 40, `应该有多个不同的到期时间，实际 ${seen.size}`);
+});
+
+await ok("第二次请求命中缓存，不再渲染", async () => {
 	const result = await call();
 	assert.equal(result.headers.get("X-Cache"), "KV");
 	assert.equal(result.body, "JPEG#1");
 	assert.equal(browserState.renders, 1);
 });
 
+await ok("同一个 host 用不同尺寸请求，共用同一张图", async () => {
+	const result = await call(
+		inner(undefined, HOST, TARGET).constructor === Request
+			? new Request(
+					`https://shot.internal/?host=${HOST}&t=${TARGET}&w=800&h=600&q=60&f=0`,
+				)
+			: inner(),
+	);
+	assert.equal(result.headers.get("X-Cache"), "KV");
+	assert.equal(result.body, "JPEG#1");
+	assert.equal(browserState.renders, 1, "不应该因为尺寸不同再渲染一次");
+});
+
 await ok("过期时先给旧图（不阻塞），刷新放到后台", async () => {
-	ageMeta(1.1);
+	setExpiry(-10);
 	const before = browserState.renders;
 	const result = await call();
 	assert.equal(result.status, 200);
@@ -388,6 +438,13 @@ await ok("过期时先给旧图（不阻塞），刷新放到后台", async () =
 	assert.equal(browserState.renders, before + 1, "后台确实刷新了一次");
 });
 
+await ok("后台刷新完成后，到期时间重新随机", async () => {
+	const header = headerOf();
+	const hours = (header.e - Date.now() / 1000) / 3600;
+	assert.ok(hours >= 48 && hours <= 96, `实际 ${hours} 小时`);
+	assert.equal(header.t, Math.floor(Date.now() / 1000));
+});
+
 await ok("后台刷新完成后，下一次请求拿到新图", async () => {
 	const result = await call();
 	assert.equal(result.headers.get("X-Cache"), "KV");
@@ -397,22 +454,18 @@ await ok("后台刷新完成后，下一次请求拿到新图", async () => {
 
 await ok("目标挂掉且图已过期时回退到最后一次成功的截图", async () => {
 	browserState.down = true;
-	ageMeta(3);
+	setExpiry(-10);
 	const before = browserState.renders;
 	const result = await call();
 	assert.equal(result.status, 200, "应该回退而不是 502");
 	assert.equal(result.headers.get("X-Cache"), "STALE");
 	assert.equal(result.body, "JPEG#2", "应该是最后一次成功的图");
 	assert.equal(browserState.renders, before + 1, "后台尝试过刷新");
-	assert.ok(
-		Number(result.headers.get("X-Screenshot-Age")) > 2 * 86400,
-		"图龄应该是 3 天左右",
-	);
-	assert.ok(kv.store.has(`fail:v1:${KEY}`), "真实失败要写负缓存");
+	assert.ok(kv.store.has(`fail:v1:${HOST}`), "真实失败要写负缓存");
 });
 
 await ok("负缓存生效：5 分钟内不再重试渲染", async () => {
-	ageMeta(3);
+	setExpiry(-10);
 	const before = browserState.renders;
 	const result = await call();
 	assert.equal(result.headers.get("X-Cache"), "STALE");
@@ -431,8 +484,8 @@ await ok("目标挂掉且从没有成功截图时返回 502", async () => {
 
 await ok("目标恢复后，后台刷新把图换新", async () => {
 	browserState.down = false;
-	kv.store.delete(`fail:v1:${KEY}`);
-	ageMeta(3);
+	kv.store.delete(`fail:v1:${HOST}`);
+	setExpiry(-10);
 	const before = browserState.renders;
 	const staleResult = await call();
 	assert.equal(staleResult.headers.get("X-Cache"), "STALE");
@@ -464,9 +517,45 @@ await ok("撞上限流时返回 503 + Retry-After，且不写负缓存", async (
 	assert.equal(res.headers.get("retry-after"), "10");
 	await ctx.flush();
 
-	assert.equal(fresh.store.has(`fail:v1:${KEY}`), false, "限流不是目标故障");
-	const warm = JSON.parse(fresh.store.get(`warm:v1:${KEY}`).text);
-	assert.ok(warm.due <= Date.now() + 1000, "应该立刻进预热队列");
+	assert.equal(fresh.store.has(`fail:v1:${HOST}`), false, "限流不是目标故障");
+	const pending = decode(fresh.store.get(KEY).bytes.buffer.slice(0));
+	assert.equal(pending.header.t, 0, "记成 pending，等着 cron 去补");
+	assert.equal(pending.bytes, null, "pending 记录里没有图");
+	assert.equal(pending.header.u, "https://a.com/");
+});
+
+await ok("pending 记录不会当成旧图返回", async () => {
+	const fresh = makeKV();
+	const ctx = makeContext();
+	const state = { rateLimit: false, renders: 0 };
+	const instance = new Shot(
+		{ waitUntil: ctx.waitUntil },
+		{ SHOTS: fresh, BROWSER: makeBrowser(state) },
+	);
+	// 先放一条 pending
+	await fresh.put(
+		KEY,
+		encode(
+			{
+				u: "https://a.com/",
+				w: 1280,
+				h: 720,
+				q: 80,
+				f: 0,
+				t: 0,
+				e: 0,
+				n: 0,
+				y: 0,
+			},
+			null,
+		),
+		{},
+	);
+	const res = await instance.fetch(inner());
+	await ctx.flush();
+	assert.equal(res.status, 200);
+	assert.equal(res.headers.get("X-Cache"), "MISS");
+	assert.equal(state.renders, 1);
 });
 
 await ok("有过期旧图时，限流不影响出图", async () => {
@@ -477,135 +566,151 @@ await ok("有过期旧图时，限流不影响出图", async () => {
 		{ waitUntil: ctx.waitUntil },
 		{ SHOTS: fresh, BROWSER: makeBrowser(state) },
 	);
-	// 先放一张 3 天前的旧图
-	const now = Date.now();
-	await fresh.put(`shot:v1:${KEY}`, new TextEncoder().encode("JPEG#old"), {});
-	await fresh.put(
-		`meta:v1:${KEY}`,
-		JSON.stringify({ t: now - 3 * 86400000, u: "https://a.com/", w: 1280, h: 720, q: 80, f: 0 }),
-		{},
-	);
+	const header = {
+		u: "https://a.com/",
+		w: 1280,
+		h: 720,
+		q: 80,
+		f: 0,
+		t: Math.floor(Date.now() / 1000) - 3 * 86400,
+		e: Math.floor(Date.now() / 1000) - 3600,
+		n: 0,
+		y: 0,
+	};
+	await fresh.put(KEY, encode(header, new TextEncoder().encode("JPEG#old")), {});
 
 	const res = await limited.fetch(inner());
 	assert.equal(res.status, 200);
 	assert.equal(res.headers.get("X-Cache"), "STALE");
 	assert.equal(new TextDecoder().decode(await res.arrayBuffer()), "JPEG#old");
 	await ctx.flush();
-	assert.equal(fresh.store.has(`fail:v1:${KEY}`), false);
+	assert.equal(fresh.store.has(`fail:v1:${HOST}`), false);
 });
 
-section("shot.ts — 有效期抖动");
+section("shot.ts — 编解码");
 
-await ok("不同 key 的有效期错开，不会同时到期", () => {
-	const keys = ["a1b2c3", "d4e5f6", "deadbeef", "0f0f0f", "cafebabe"];
-	const ttls = keys.map(ttlFor);
-	assert.equal(new Set(ttls).size > 1, true, "应该有不同值");
-	for (const ttl of ttls) {
-		assert.ok(ttl >= 86400 && ttl < 86400 + 21600, `实际 ${ttl}`);
-	}
+await ok("头部与图片能原样往返", () => {
+	const header = makeHeader(
+		{ url: "https://a.com/", width: 1280, height: 720, quality: 80, fullPage: false },
+		Date.now(),
+	);
+	const bytes = new Uint8Array([1, 2, 3, 250, 251, 252]);
+	const stored = decode(encode(header, bytes).buffer.slice(0));
+	assert.equal(stored.header.u, header.u);
+	assert.equal(stored.header.e, header.e);
+	assert.deepEqual([...new Uint8Array(stored.bytes)], [1, 2, 3, 250, 251, 252]);
 });
 
-await ok("同一个 key 永远算出同一个有效期", () => {
-	assert.equal(ttlFor("same"), ttlFor("same"));
-});
-
-await ok("边缘 max-age 只到真正过期为止", async () => {
-	const fresh = makeKV();
-	const ctx = makeContext();
-	const instance = new Shot(
-		{ waitUntil: ctx.waitUntil },
-		{ SHOTS: fresh, BROWSER: makeBrowser({ renders: 0 }) },
+await ok("没有图片时解码出 null", () => {
+	const header = makeHeader(
+		{ url: "https://a.com/", width: 1280, height: 720, quality: 80, fullPage: false },
+		Date.now(),
 	);
-	await instance.fetch(inner());
-	await ctx.flush();
-
-	// 手动把图龄改成 6 小时
-	const meta = JSON.parse(fresh.store.get(`meta:v1:${KEY}`).text);
-	meta.t = Date.now() - 6 * 3600000;
-	fresh.store.get(`meta:v1:${KEY}`).text = JSON.stringify(meta);
-
-	const res = await instance.fetch(inner());
-	const maxAge = Number(
-		/(\d+)/.exec(res.headers.get("cache-control").split("max-age=")[1])[1],
-	);
-	assert.ok(
-		Math.abs(maxAge - (ttlFor(KEY) - 6 * 3600)) < 5,
-		`max-age 应该扣掉已过的 6 小时，实际 ${maxAge}`,
-	);
-	await ctx.flush();
+	const stored = decode(encode(header, null).buffer.slice(0));
+	assert.equal(stored.bytes, null);
+	assert.equal(stored.header.u, "https://a.com/");
 });
 
 // ---------------------------------------------------------------------------
 // warm.ts
 // ---------------------------------------------------------------------------
 
-section("warm.ts — 后台预热");
+section("warm.ts — 后台刷新");
 
-const dueWarm = (key, due, extra = {}) =>
-	JSON.stringify({
-		url: "https://a.com/",
-		width: 1280,
-		height: 720,
-		quality: 80,
-		fullPage: false,
-		due,
-		...extra,
-	});
-
-await ok("每个 tick 只渲染一个最该刷新的目标", async () => {
-	const fresh = makeKV();
-	const state = { renders: 0 };
-	const now = Date.now();
-	await fresh.put(`warm:v1:first`, dueWarm("first", now - 3000), {});
-	await fresh.put(`warm:v1:second`, dueWarm("second", now - 2000), {});
-	await fresh.put(`warm:v1:third`, dueWarm("third", now - 1000), {});
-
-	await warm({ SHOTS: fresh, BROWSER: makeBrowser(state) });
-	assert.equal(state.renders, 1, "一次只渲染一个，才碰不到 1 次/10 秒的限制");
-
-	// 最早的那个被刷新了，due 推到未来
-	const first = JSON.parse(fresh.store.get(`warm:v1:first`).text);
-	assert.ok(first.due > now, "刷新后 due 应该在将来");
-	const second = JSON.parse(fresh.store.get(`warm:v1:second`).text);
-	assert.equal(second.due, now - 2000, "其余的不动");
+const dueHeader = (over = {}) => ({
+	u: "https://a.com/",
+	w: 1280,
+	h: 720,
+	q: 80,
+	f: 0,
+	t: Math.floor(Date.now() / 1000) - 3 * 86400,
+	e: Math.floor(Date.now() / 1000) - 3600,
+	n: 0,
+	y: 0,
+	...over,
 });
 
-await ok("没有到期的就什么都不做", async () => {
+await ok("补上 pending 记录", async () => {
 	const fresh = makeKV();
 	const state = { renders: 0 };
-	await fresh.put(`warm:v1:later`, dueWarm("later", Date.now() + 60000), {});
+	await fresh.put(
+		KEY,
+		encode(dueHeader({ t: 0, e: 0 }), null),
+		{},
+	);
+	await warm({ SHOTS: fresh, BROWSER: makeBrowser(state) });
+	assert.equal(state.renders, 1);
+	const stored = decode(fresh.store.get(KEY).bytes.buffer.slice(0));
+	assert.ok(stored.bytes, "应该写出图了");
+	assert.ok(stored.header.t > 0, "不再是 pending");
+});
+
+await ok("刷新到期的那一张", async () => {
+	const fresh = makeKV();
+	const state = { renders: 0 };
+	const soon = Math.floor(Date.now() / 1000) - 10;
+	await fresh.put(KEY, encode(dueHeader({ e: soon }), new Uint8Array([1])), {});
+	await warm({ SHOTS: fresh, BROWSER: makeBrowser(state) });
+	assert.equal(state.renders, 1);
+	const stored = decode(fresh.store.get(KEY).bytes.buffer.slice(0));
+	assert.ok(stored.header.e > Date.now() / 1000, "到期时间推到将来");
+});
+
+await ok("没到期的不动", async () => {
+	const fresh = makeKV();
+	const state = { renders: 0 };
+	await fresh.put(
+		KEY,
+		encode(dueHeader({ e: Math.floor(Date.now() / 1000) + 60000 }), new Uint8Array([1])),
+		{},
+	);
 	await warm({ SHOTS: fresh, BROWSER: makeBrowser(state) });
 	assert.equal(state.renders, 0);
 });
 
-await ok("失败后按 10 分钟起步退避，并记失败次数", async () => {
-	const fresh = makeKV();
-	const state = { down: true, renders: 0 };
-	const now = Date.now();
-	await fresh.put(`warm:v1:broken`, dueWarm("broken", now - 1000), {});
-
-	await warm({ SHOTS: fresh, BROWSER: makeBrowser(state) });
-	assert.equal(state.renders, 1);
-
-	const record = JSON.parse(fresh.store.get(`warm:v1:broken`).text);
-	assert.equal(record.tries, 1);
-	const delay = (record.due - Date.now()) / 1000;
-	assert.ok(delay > 580 && delay <= 600, `应该退避约 10 分钟，实际 ${delay}s`);
-	assert.ok(fresh.store.has(`fail:v1:broken`), "顺手写负缓存");
-});
-
-await ok("成功一次就把失败次数清零", async () => {
+await ok("每个 tick 只渲染一个", async () => {
 	const fresh = makeKV();
 	const state = { renders: 0 };
+	await fresh.put("shot:v1:a.com", encode(dueHeader(), new Uint8Array([1])), {});
+	await fresh.put("shot:v1:b.com", encode(dueHeader(), new Uint8Array([1])), {});
+	await fresh.put("shot:v1:c.com", encode(dueHeader(), new Uint8Array([1])), {});
+	await warm({ SHOTS: fresh, BROWSER: makeBrowser(state) });
+	assert.equal(state.renders, 1, "1 次/5 分钟，永远碰不到限流");
+});
+
+await ok("失败后退避，并保留旧图", async () => {
+	const fresh = makeKV();
+	const state = { down: true, renders: 0 };
 	await fresh.put(
-		`warm:v1:recover`,
-		dueWarm("recover", Date.now() - 1000, { tries: 3 }),
+		KEY,
+		encode(dueHeader(), new TextEncoder().encode("JPEG#old")),
 		{},
 	);
 	await warm({ SHOTS: fresh, BROWSER: makeBrowser(state) });
-	const record = JSON.parse(fresh.store.get(`warm:v1:recover`).text);
-	assert.equal(record.tries, undefined, "成功后不再带 tries");
-	assert.ok(record.due > Date.now());
+	assert.equal(state.renders, 1);
+
+	const stored = decode(fresh.store.get(KEY).bytes.buffer.slice(0));
+	assert.ok(stored.bytes, "旧图不能丢");
+	assert.equal(new TextDecoder().decode(stored.bytes), "JPEG#old");
+	assert.equal(stored.header.y, 1, "记一次失败");
+	const delay = stored.header.n - Date.now() / 1000;
+	assert.ok(delay > 500 && delay <= 600, `应该退避约 10 分钟，实际 ${delay}s`);
+	assert.ok(fresh.store.has(`fail:v1:a.com`), "顺手写负缓存");
+});
+
+await ok("退避期内不再重试", async () => {
+	const fresh = makeKV();
+	const state = { down: true, renders: 0 };
+	await fresh.put(
+		KEY,
+		encode(
+			dueHeader({ n: Math.floor(Date.now() / 1000) + 600, y: 1 }),
+			new Uint8Array([1]),
+		),
+		{},
+	);
+	await warm({ SHOTS: fresh, BROWSER: makeBrowser(state) });
+	assert.equal(state.renders, 0);
 });
 
 // ---------------------------------------------------------------------------
