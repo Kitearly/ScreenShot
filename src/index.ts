@@ -9,9 +9,8 @@
  * 合法的 403 也会被缓存下来发给所有人。
  */
 
-import { cacheHost, isAllowedCaller, parseShot, type Env } from "./target";
+import { isAllowedCaller, parseShot, type Env } from "./target";
 import { Shot } from "./shot";
-import { warm } from "./warm";
 
 export { Shot };
 
@@ -35,32 +34,16 @@ export default {
 		if (!parsed.ok) {
 			return new Response(parsed.message, { status: parsed.status });
 		}
-		const shot = parsed.shot;
-
-		// 缓存键只用 host：同一个站点的不同页面、不同尺寸共用一份图。
-		const host = cacheHost(shot.url);
+		const { url, host } = parsed.shot;
 
 		const inner = new URL("https://shot.internal/");
 		inner.searchParams.set("host", host);
-		inner.searchParams.set("t", shot.url);
-		inner.searchParams.set("w", String(shot.width));
-		inner.searchParams.set("h", String(shot.height));
-		inner.searchParams.set("q", String(shot.quality));
-		inner.searchParams.set("f", shot.fullPage ? "1" : "0");
+		inner.searchParams.set("t", url);
 
 		// 转交被缓存的入口：同一个 host 的并发请求会落到同一个缓存键上，
 		// 由 Workers Cache 合并成一次渲染。
 		return ctx.exports.Shot.fetch(new Request(inner.toString(), request), {
 			cf: { cacheKey: `/?host=${host}` },
 		});
-	},
-
-	/**
-	 * 后台刷新。只在配置了 cron trigger 时才会被调用（见 wrangler.jsonc）。
-	 *
-	 * 每个 tick 只渲染一个目标，所以永远不会撞上「1 次 / 10 秒」的限流。
-	 */
-	async scheduled(_controller, env) {
-		await warm(env);
 	},
 } satisfies ExportedHandler<Env>;

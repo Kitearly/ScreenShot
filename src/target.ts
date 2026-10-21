@@ -19,29 +19,12 @@ export interface Env {
 // 配置
 // ---------------------------------------------------------------------------
 
-/** 默认视口宽度。 */
-export const DEFAULT_WIDTH = 1280;
-/** 默认视口高度。 */
-export const DEFAULT_HEIGHT = 720;
-/** 默认 JPEG 质量。 */
-export const DEFAULT_QUALITY = 80;
-
-const WIDTH_MIN = 320;
-const WIDTH_MAX = 1920;
-const HEIGHT_MIN = 400;
-const HEIGHT_MAX = 4000;
-const QUALITY_MIN = 40;
-const QUALITY_MAX = 95;
-
 /** 一条截图请求的全部参数。 */
 export interface ShotRequest {
 	/** 规范化后的目标地址。 */
 	url: string;
-	width: number;
-	height: number;
-	quality: number;
-	/** true = 整页长图。 */
-	fullPage: boolean;
+	/** 缓存键：一个 host 一份图。 */
+	host: string;
 }
 
 export type ParseResult =
@@ -100,7 +83,10 @@ const BLOCKED_HOSTS = new Set([
 // ---------------------------------------------------------------------------
 
 /**
- * 解析并校验一次截图请求。`url` 放在查询串最后，其余参数均可省略。
+ * 解析并校验一次截图请求。
+ *
+ * API 只有一个参数：`url`。视口尺寸固定，不给调用方调的余地 ——
+ * 免得同一个 host 因为尺寸组合不同而多存几份图。
  */
 export function parseShot(request: Request): ParseResult {
 	const params = new URL(request.url).searchParams;
@@ -121,29 +107,11 @@ export function parseShot(request: Request): ParseResult {
 		return { ok: false, status: 400, message: `blocked target: ${blocked}` };
 	}
 
+	const url = normalizeTarget(target);
 	return {
 		ok: true,
-		shot: {
-			url: normalizeTarget(target),
-			width: clampInt(params.get("w"), DEFAULT_WIDTH, WIDTH_MIN, WIDTH_MAX),
-			height: clampInt(params.get("h"), DEFAULT_HEIGHT, HEIGHT_MIN, HEIGHT_MAX),
-			quality: clampInt(params.get("q"), DEFAULT_QUALITY, QUALITY_MIN, QUALITY_MAX),
-			fullPage: params.get("full") === "1",
-		},
+		shot: { url, host: cacheHost(url) },
 	};
-}
-
-/** 读取整数查询参数，缺省或非法时取默认值，越界时收敛到区间内。 */
-export function clampInt(
-	raw: string | null,
-	fallback: number,
-	min: number,
-	max: number,
-): number {
-	if (raw === null) return fallback;
-	const value = Number(raw);
-	if (!Number.isFinite(value)) return fallback;
-	return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 /**
