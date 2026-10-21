@@ -40,9 +40,9 @@ GET https://你的域名/?url=https%3A%2F%2Fexample.com
                   ▼
   ┌───────────────────────────────┐
   │ Workers KV                     │
-  │  shot:v1:<host>   随机 3~7 天  │  当前这一份（消失即触发刷新）
-  │  shot:last:<host>  永不过期    │  最后一次成功的图（兜底）
-  │  fail:v1:<host>   30 分钟       │  负缓存（护配额）
+  │  shot:now:<host>  随机 3~7 天  │  当前这一份（消失即触发刷新）
+  │  shot:last:<host> 永不过期     │  最后一次成功的图（兜底）
+  │  fail:<host>      30 分钟      │  负缓存（护配额）
   └───────────────┬───────────────┘
                   │  没有当前份时
                   ▼
@@ -75,7 +75,7 @@ Workers Cache 的缓存键只由「路径 + 查询串 + 入口 + Worker 版本�
 > **每次写入都重新抽一个随机的到期时间，同一批图就会持续错开，永远不会一起到期。**
 
 ```
-shot:v1:<host> 的 expirationTtl = rand(3 天, 7 天)     // 每次写入重抽
+shot:now:<host> 的 expirationTtl = rand(3 天, 7 天)     // 每次写入重抽
 ```
 
 11 个 host 均匀落在 4 天的窗口里，期望最小间隔约 **47 分钟** —— 远远大于限流的 10 秒。
@@ -93,7 +93,7 @@ Workers Cache 的副本有自己的寿命，它过期后才会回头问源站。
 
 ### 目标挂掉时
 
-`shot:v1` 过期就没了，但 `shot:last` 永远在 —— 渲染失败时直接拿它兜底，页面不会开天窗。
+`shot:now` 过期就没了，但 `shot:last` 永远在 —— 渲染失败时直接拿它兜底，页面不会开天窗。
 
 ### 429 不是「目标坏了」
 
@@ -297,7 +297,7 @@ Worker 挂在不同位置时的实际路径：
 
 ```bash
 # 让某个站点重新出一张图（下次访问时渲染）
-npx wrangler kv key delete --binding SHOTS "shot:v1:<host>"
+npx wrangler kv key delete --binding SHOTS "shot:now:<host>"
 
 # 连兜底份一起清掉，省存储
 npx wrangler kv key delete --binding SHOTS "shot:last:<host>"

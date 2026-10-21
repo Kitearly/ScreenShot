@@ -6,7 +6,7 @@
  *
  * 存储只有两条记录，都是纯图片字节：
  *
- * - `shot:v1:<host>`  当前这一份，带一个**随机有效期**（3~7 天）。
+ * - `shot:now:<host>`  当前这一份，带一个**随机有效期**（3~7 天）。
  *   它的消失就是刷新触发器 —— 每次写入都重抽，所以一批 host 的到期时间
  *   会持续错开，永远不会一起过期、一起去抢那「1 次 / 10 秒」的额度。
  * - `shot:last:<host>` 最后一次成功渲染的图，**永不过期**。
@@ -87,11 +87,11 @@ const CONTENT_TYPE = "image/jpeg";
 // ---------------------------------------------------------------------------
 
 /** 当前这一份，带随机有效期。 */
-export const currentKey = (host: string) => `shot:v1:${host}`;
+export const nowKey = (host: string) => `shot:now:${host}`;
 /** 最后一次成功的截图，永不过期，失败时兜底。 */
 export const lastKey = (host: string) => `shot:last:${host}`;
 /** 负缓存。 */
-export const failKey = (host: string) => `fail:v1:${host}`;
+export const failKey = (host: string) => `fail:${host}`;
 
 // ---------------------------------------------------------------------------
 // 入口
@@ -110,7 +110,7 @@ export class Shot extends WorkerEntrypoint<Env> {
 
 		// 1) 当前这一份还在（键没过期）就直接用 —— 不需要任何额外判断，
 		//    「键存在」本身就等于「还新鲜」。
-		const current = await env.SHOTS.get(currentKey(host), "arrayBuffer");
+		const current = await env.SHOTS.get(nowKey(host), "arrayBuffer");
 		if (current && current.byteLength > 0) {
 			return image(host, current, "KV");
 		}
@@ -226,7 +226,7 @@ async function persist(
 ): Promise<void> {
 	try {
 		await Promise.all([
-			env.SHOTS.put(currentKey(host), bytes, { expirationTtl: randomTtl() }),
+			env.SHOTS.put(nowKey(host), bytes, { expirationTtl: randomTtl() }),
 			// 不传 expirationTtl → 永不过期。
 			env.SHOTS.put(lastKey(host), bytes),
 		]);

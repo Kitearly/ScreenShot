@@ -13,7 +13,7 @@ import {
 	normalizeTarget,
 	parseShot,
 } from "../src/target.ts";
-import { Shot, currentKey, failKey, lastKey, randomTtl } from "../src/shot.ts";
+import { Shot, nowKey, failKey, lastKey, randomTtl } from "../src/shot.ts";
 
 // ---------------------------------------------------------------------------
 // 迷你测试框架
@@ -317,13 +317,13 @@ await ok("尺寸固定 1280x720，jpeg 画质 80，不截整页", () => {
 });
 
 await ok("值里就是图片本身，没有头部", async () => {
-	const entry = kv.store.get(currentKey(HOST));
+	const entry = kv.store.get(nowKey(HOST));
 	assert.equal(entry.bytes.length, "JPEG#1".length);
 	assert.equal(new TextDecoder().decode(entry.bytes), "JPEG#1");
 });
 
 await ok("当前份带一个 3~7 天的随机有效期", () => {
-	const entry = kv.store.get(currentKey(HOST));
+	const entry = kv.store.get(nowKey(HOST));
 	const days = (entry.expiresAt - Date.now()) / 86400000;
 	assert.ok(days >= 3 && days <= 7, `实际 ${days} 天`);
 });
@@ -440,7 +440,7 @@ await ok("目标恢复后重新出图，并刷新两份记录", async () => {
 	assert.equal(res.status, 200);
 	assert.equal(res.headers.get("X-Cache"), "MISS");
 	assert.equal(state.renders, 1);
-	assert.equal(new TextDecoder().decode(fresh.store.get(currentKey(HOST)).bytes), "JPEG#1");
+	assert.equal(new TextDecoder().decode(fresh.store.get(nowKey(HOST)).bytes), "JPEG#1");
 	assert.equal(new TextDecoder().decode(fresh.store.get(lastKey(HOST)).bytes), "JPEG#1");
 });
 
@@ -454,7 +454,7 @@ await ok("当前份过期（键消失）后重新渲染", async () => {
 	await instance.fetch(inner());
 	assert.equal(state.renders, 1);
 	// 模拟 KV 到了有效期，键被删掉
-	fresh.store.delete(currentKey(HOST));
+	fresh.store.delete(nowKey(HOST));
 	const res = await instance.fetch(inner());
 	assert.equal(res.headers.get("X-Cache"), "MISS");
 	assert.equal(state.renders, 2);
