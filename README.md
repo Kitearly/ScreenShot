@@ -266,6 +266,7 @@ Worker 挂在不同位置时的实际路径：
 | `src/shot.ts` | `WAIT_UNTIL` | `networkidle2` | 页面加载完成的判定 |
 | `src/shot.ts` | `GOTO_TIMEOUT` / `ACTION_TIMEOUT` | 20000 / 10000 | 加载与截图的超时（毫秒） |
 | `src/shot.ts` | `BROWSER_CACHE_TTL` | 0 | Cloudflare 侧浏览器缓存，见下方说明 |
+| `src/shot.ts` | `STALE_IF_ERROR` | 86400 | 边缘上源站报错时，继续用旧副本的窗口（秒），随 `Cache-Control` 一起返回 |
 
 > `BROWSER_CACHE_TTL` 默认关掉了。它能省下「本地缓存被清空」那一次渲染，
 > 但官方没有公开它的缓存键是否包含视口 / 质量等参数，
@@ -318,7 +319,9 @@ Browser Run 的计费单位是**浏览器时长**。
 
 - Free 档的硬上限约 **300 次 / 天**；
 - 有效期 3~7 天 + 11 个 host ⇒ 约 **2.2 次 / 天**，与访问量完全无关；
-- 失败、超时的调用不计入浏览器时长，但仍会占用限流名额。
+- 失败、超时的调用不计入浏览器时长，但仍会占用限流名额
+  （官方计费 FAQ：*"If a Quick Actions request fails with a `waitForTimeout` error,
+  the browser session is not charged."*）。
 
 > **并发才是真正的瓶颈，不是总量。** 1 次 / 10 秒意味着 1 分钟最多 6 次，
 > 而一个友链页面一次就要 11 张。所以随机到期时间才是让「访问量无关」真正成立的东西 ——
