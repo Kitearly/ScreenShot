@@ -3,7 +3,10 @@
 	"name": "screenshot",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-10-20",
-	"workers_dev": true,
+
+	// 只走自定义域名 / 路由。workers.dev 是第二个公开入口：
+	// 关掉它，免得绕过白名单，也少一份独立的缓存与计费。
+	"workers_dev": false,
 
 	// Browser Run 绑定：无需 API Token，也无需 Account ID。
 	// 调用方式见 src/shot.ts —— env.BROWSER.quickAction("screenshot", …)
@@ -11,7 +14,7 @@
 		"binding": "BROWSER"
 	},
 
-	// Workers KV 命名空间：持久化截图二进制与元数据。
+	// Workers KV 命名空间：持久化截图二进制。
 	//
 	// 还没建的话执行下面这条命令，它会自动把真实的 namespace id 写回本文件：
 	//   npx wrangler kv namespace create SHOTS --binding SHOTS --update-config
@@ -23,7 +26,9 @@
 		}
 	],
 
-	// Workers Cache：分层缓存 + 并发请求合并 + stale-while-revalidate。
+	// Workers Cache：分层缓存 + 并发请求合并。
+	// 缓存时长由 src/shot.ts 返回的 Cache-Control 决定
+	// （随机 max-age + stale-while-revalidate + stale-if-error）。
 	"cache": {
 		"enabled": true
 	},
@@ -41,6 +46,14 @@
 			"cache": {
 				"enabled": true
 			}
+		}
+	},
+
+	// 运行时日志：渲染失败、429、KV 写失败都会进控制台 Workers Logs。
+	"observability": {
+		"logs": {
+			"enabled": true,
+			"invocation_logs": true
 		}
 	}
 }

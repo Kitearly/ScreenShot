@@ -16,23 +16,22 @@ export { Shot };
 
 export default {
 	async fetch(request, env, ctx) {
-		if (request.method !== "GET" && request.method !== "HEAD") {
-			return new Response("method not allowed", {
-				status: 405,
-				headers: { allow: "GET, HEAD" },
-			});
+		// 只收 GET：HEAD 在冷缓存上同样会触发一次完整渲染（约 2 秒额度），
+		// 而这个接口的用途是 <img> 取图，没有需要探测的场景。
+		if (request.method !== "GET") {
+			return problem(405, "method not allowed", { allow: "GET" });
 		}
 
 		// 只有一个端点：Worker 挂在哪就调哪，路径本身不参与判断。
 		// 挂在域名根是 "/"，挂在 example.com/api/* 路由上是 "/api/…"，都能直接用。
 
 		if (!isAllowedCaller(request, env.ALLOWED_DOMAINS)) {
-			return new Response("forbidden", { status: 403 });
+			return problem(403, "forbidden");
 		}
 
 		const parsed = parseShot(request);
 		if (!parsed.ok) {
-			return new Response(parsed.message, { status: parsed.status });
+			return problem(parsed.status, parsed.message);
 		}
 		const { url, host } = parsed.shot;
 
@@ -47,3 +46,24 @@ export default {
 		});
 	},
 } satisfies ExportedHandler<Env>;
+
+/**
+ * 网关侧的错误响应：明确不缓存。
+ *
+ * 网关入口本身关了 Workers Cache，这里再标一次 no-store 不花成本，
+ * 将来配置变动时也不会出现「合法的 403 被发给所有人」。
+ */
+function problem(
+	status: number,
+	message: string,
+	extra?: Record<string, string>,
+): Response {
+	return new Response(message, {
+		status,
+		headers: {
+			"Content-Type": "text/plain; charset=utf-8",
+			"Cache-Control": "no-store",
+			...extra,
+		},
+	});
+}

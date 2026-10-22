@@ -145,14 +145,30 @@ npx wrangler kv namespace create SHOTS --binding SHOTS --update-config
 npm run predeploy   # 有占位符会直接报错并给出上面的命令
 ```
 
-### 3.（可选）限制调用来源
+### 3.（强烈建议）限制调用来源
+
+不设的话接口是公开的：任何人都能拿它截任意网站，一天塞几百个目标就能把渲染额度烧光，
+`shot:last` 也会跟着无限堆积。
 
 ```bash
 npx wrangler secret put ALLOWED_DOMAINS
+# 粘贴放截图的页面所在域名，逗号分隔
 # 例：example.com,*.example.com
 ```
 
-留空表示不做限制，任何人都能调用 —— **公开的截图接口很容易被刷额度，建议配置**。
+也可以在控制台 **Settings → Variables and Secrets** 里加同名 secret，效果一样。
+
+- 匹配的是 `Origin` / `Referer` 的**主机名**；`example.com` 同时匹配其子域，`*.example.com` 只匹配子域。
+- 填**放截图的页面**的域名，不是被截的目标站域名。
+- `<img>` 默认带 `Referer`；但页面若设了 `Referrer-Policy: no-referrer`，请求不带来源 → 一律 403。
+- curl 没有来源头，测试时要手动带：
+
+```bash
+curl -o shot.jpg -H "Referer: https://example.com/" \
+  "https://api.example.com/screenshot?url=https%3A%2F%2Fexample.com"
+```
+
+本地开发把同样的值写进 `.dev.vars`（模板见 `.dev.vars.example`），不要提交。
 
 ### 4. 部署
 
@@ -163,10 +179,17 @@ npm run deploy
 用 `npm run deploy` 而不是 `npx wrangler deploy`，是为了让 `predeploy` 检查先跑一遍，
 避免占位符走到 Cloudflare 构建里才失败。
 
-### 5. 绑定自定义域名（可选）
+### 5. 绑定自定义域名（必需）
 
-在 Cloudflare 控制台给这个 Worker 绑一个域名，或在 `wrangler.jsonc` 里加 `routes`。
-不绑的话默认走 `*.workers.dev`，也能直接用。
+`wrangler.jsonc` 里已经把 `workers_dev` 关掉了 —— 没有自定义域名或路由，部署后**没有入口**。
+
+在 Cloudflare 控制台给它绑一个域名，或在 `wrangler.jsonc` 里加 `routes`：
+
+```jsonc
+"routes": [{ "pattern": "api.example.com", "custom_domain": true }]
+```
+
+> 路由绑在控制台时不用写进配置也能部署，只是换机器 / 换账号时容易忘。
 
 ### 用 Git 仓库部署（Cloudflare Workers Builds）
 
@@ -212,7 +235,6 @@ Worker 挂在不同位置时的实际路径：
 | 自定义域名 | `https://api.example.com/?url=…` | `/` |
 | 子域名 | `https://api.example.com/?url=…` | `/` |
 | 路由 `example.com/api/*` | `https://example.com/api/?url=…` | `/api/` |
-| workers.dev | `https://screenshot.workers.dev/?url=…` | `/` |
 
 > **缓存键只用 host** —— 同一个站点的不同页面拿到的是同一张图。
 > 这对友链页面正好合适：每个站点一张封面。
@@ -226,6 +248,7 @@ Worker 挂在不同位置时的实际路径：
 | `X-Browser-Ms-Used` | 本次渲染实际消耗的浏览器时长（毫秒），仅 `MISS` 时出现 |
 | `X-Screenshot-Reason` | 仅 `STALE` 时出现，说明为什么用了旧图 |
 | `Cache-Tag` | `shot` 与 `shot:<host>`，可用于按标签清缓存 |
+| `Cache-Control` | `max-age` 每次随机 10~60 分钟；`stale-while-revalidate=60`（过期先给旧图、后台再验证）；`stale-if-error=86400`（源站报错时继续用旧图一天） |
 
 ### 错误
 
@@ -233,7 +256,7 @@ Worker 挂在不同位置时的实际路径：
 | --- | --- |
 | `400` | 缺 `url`、URL 非法、目标是内网地址 |
 | `403` | 来源不在白名单，或目标解析到内网地址 |
-| `405` | 方法不是 GET / HEAD |
+| `405` | 方法不是 GET（HEAD 也不放行） |
 | `502` | 渲染失败（且没有兜底图） |
 | `503` | 撞上 Browser Run 的限流（`Retry-After: 10`），且没有兜底图 |
 
@@ -254,6 +277,8 @@ Worker 挂在不同位置时的实际路径：
 | --- | --- |
 | `ALLOWED_DOMAINS` | 可选。允许调用方的域名白名单，逗号分隔。留空 = 不限制 |
 
+**日志**：`wrangler.jsonc` 里开了 `observability.logs`，渲染失败、429、KV 写失败都会进控制台 Workers Logs。
+
 **代码常量**（改这些不用动结构）
 
 | 位置 | 常量 | 默认 | 作用 |
@@ -267,6 +292,7 @@ Worker 挂在不同位置时的实际路径：
 | `src/shot.ts` | `GOTO_TIMEOUT` / `ACTION_TIMEOUT` | 20000 / 10000 | 加载与截图的超时（毫秒） |
 | `src/shot.ts` | `BROWSER_CACHE_TTL` | 0 | Cloudflare 侧浏览器缓存，见下方说明 |
 | `src/shot.ts` | `STALE_IF_ERROR` | 86400 | 边缘上源站报错时，继续用旧副本的窗口（秒），随 `Cache-Control` 一起返回 |
+| `src/shot.ts` | `STALE_WHILE_REVALIDATE` | 60 | 边缘副本过期后，先给旧图、后台再验证的窗口（秒） |
 
 > `BROWSER_CACHE_TTL` 默认关掉了。它能省下「本地缓存被清空」那一次渲染，
 > 但官方没有公开它的缓存键是否包含视口 / 质量等参数，
@@ -366,6 +392,8 @@ npx wrangler dev
 
 然后用 `npx wrangler dev --remote` 运行。
 
+`ALLOWED_DOMAINS` 等变量写进 `.dev.vars`（模板：`.dev.vars.example`），不要提交。
+
 ---
 
 ## 目录
@@ -375,6 +403,8 @@ src/
   index.ts   网关入口（白名单 → 规范化 → 按 host 转交）
   target.ts  目标 URL 的解析 / 规范化 / 安全校验、缓存键（host）
   shot.ts    渲染、存取、随机有效期、限流与兜底
+.github/
+  workflows/ci.yml  push / PR 自动跑 typecheck 与测试
 scripts/
   check-config.mjs  部署前检查：KV namespace id 不能还是占位符
 test/
@@ -387,11 +417,11 @@ types/
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # 39 项断言：URL 规范化、SSRF、参数、缓存键、白名单、渲染与存取、限流与兜底、有效期随机性
+npm test            # 44 项断言：URL 规范化、SSRF、参数、缓存键、白名单、渲染与存取、限流与兜底、有效期随机性、网关
 ```
 
 测试用 Node 原生的类型剥离直接跑 `src/` 源码，不经过打包，
-所以断言的就是线上要跑的那份代码。
+所以断言的就是线上要跑的那份代码。`.github/workflows/ci.yml` 在每次 push / PR 上跑同样的两项检查。
 
 ---
 

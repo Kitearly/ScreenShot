@@ -9,7 +9,7 @@
 export interface Env {
 	/** Browser Run 绑定（wrangler.jsonc 里的 "browser"）。 */
 	BROWSER: BrowserRun;
-	/** Workers KV 命名空间，持久化截图二进制与元数据。 */
+	/** Workers KV 命名空间，持久化截图二进制。 */
 	SHOTS: KVNamespace;
 	/** 可选：允许调用方的域名白名单，逗号分隔；留空表示不限制。 */
 	ALLOWED_DOMAINS?: string;
@@ -361,10 +361,6 @@ function parseIPv6(host: string): number[] | null {
 // 缓存键
 // ---------------------------------------------------------------------------
 
-/**
- * 计算截图的规范键：所有会影响画面的参数参与哈希。
- * 键相同即视为同一张图，可以直接复用缓存、跳过渲染。
- */
 /**
  * 缓存键：只用 host。
  *

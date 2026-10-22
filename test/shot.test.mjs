@@ -14,6 +14,7 @@ import {
 	parseShot,
 } from "../src/target.ts";
 import { Shot, nowKey, failKey, lastKey, randomTtl } from "../src/shot.ts";
+import worker from "../src/index.ts";
 
 // ---------------------------------------------------------------------------
 // 迷你测试框架
@@ -350,6 +351,11 @@ await ok("边缘 max-age 在 10~60 分钟之间随机", async () => {
 			/max-age=(\d+)/.exec(result.headers.get("cache-control"))[1],
 		);
 		assert.ok(maxAge >= 600 && maxAge <= 3600, `实际 ${maxAge}`);
+		assert.match(
+			result.headers.get("cache-control"),
+			/stale-while-revalidate=60/,
+			"过期时应先给旧图、后台再验证",
+		);
 		seen.add(maxAge);
 	}
 	assert.ok(seen.size > 5, `应该每次都不同，实际 ${seen.size} 种`);
@@ -475,6 +481,91 @@ await ok("连续抽到的到期时间互不相同，不会挤在一起", () => {
 		seen.add(randomTtl());
 	}
 	assert.ok(seen.size > 150, `实际 ${seen.size} 种`);
+});
+
+// ---------------------------------------------------------------------------
+// index.ts（网关）
+// ---------------------------------------------------------------------------
+
+section("index.ts — 网关");
+
+const gateway = (qs = `url=${enc("https://a.com/")}`, init) =>
+	new Request(`https://api.example.com/?${qs}`, init);
+
+function makeCtx() {
+	const calls = [];
+	return {
+		calls,
+		ctx: {
+			exports: {
+				Shot: {
+					async fetch(req, opts) {
+						calls.push({ url: req.url, opts });
+						return new Response("JPEG#gw", {
+							headers: { "content-type": "image/jpeg", "X-Cache": "MISS" },
+						});
+					},
+				},
+			},
+		},
+	};
+}
+
+await ok("GET 转交给 Shot：内部 URL 带 host 与目标，缓存键按 host", async () => {
+	const { ctx, calls } = makeCtx();
+	const res = await worker.fetch(gateway(), {}, ctx);
+	assert.equal(res.status, 200);
+	assert.equal(res.headers.get("content-type"), "image/jpeg");
+	assert.equal(calls.length, 1);
+	const inner = new URL(calls[0].url);
+	assert.equal(inner.hostname, "shot.internal");
+	assert.equal(inner.searchParams.get("host"), "a.com");
+	assert.equal(inner.searchParams.get("t"), "https://a.com/");
+	assert.deepEqual(calls[0].opts, { cf: { cacheKey: "/?host=a.com" } });
+});
+
+await ok("非 GET 一律 405，HEAD 也不放行，且不转交", async () => {
+	for (const method of ["POST", "PUT", "HEAD", "DELETE"]) {
+		const { ctx, calls } = makeCtx();
+		const res = await worker.fetch(gateway(undefined, { method }), {}, ctx);
+		assert.equal(res.status, 405, method);
+		assert.equal(res.headers.get("allow"), "GET", method);
+		assert.equal(res.headers.get("cache-control"), "no-store", method);
+		assert.equal(calls.length, 0, `${method} 不该转交到 Shot`);
+	}
+});
+
+await ok("来源不在白名单：403 且不缓存、不转交", async () => {
+	const { ctx, calls } = makeCtx();
+	const req = new Request(
+		`https://api.example.com/?url=${enc("https://a.com/")}`,
+		{ headers: { origin: "https://evil.com" } },
+	);
+	const res = await worker.fetch(req, { ALLOWED_DOMAINS: "example.com" }, ctx);
+	assert.equal(res.status, 403);
+	assert.equal(res.headers.get("cache-control"), "no-store");
+	assert.equal(calls.length, 0);
+});
+
+await ok("白名单内来源正常转交", async () => {
+	const { ctx, calls } = makeCtx();
+	const req = new Request(
+		`https://api.example.com/?url=${enc("https://a.com/")}`,
+		{ headers: { referer: "https://blog.example.com/post" } },
+	);
+	const res = await worker.fetch(req, { ALLOWED_DOMAINS: "example.com" }, ctx);
+	assert.equal(res.status, 200);
+	assert.equal(calls.length, 1);
+});
+
+await ok("缺 url / 非法 url / 内网目标都在网关拦下 400", async () => {
+	for (const qs of ["", `url=${enc("not a url")}`, `url=${enc("http://127.0.0.1/")}`]) {
+		const { ctx, calls } = makeCtx();
+		const res = await worker.fetch(gateway(qs), {}, ctx);
+		assert.equal(res.status, 400, qs);
+		assert.equal(res.headers.get("cache-control"), "no-store", qs);
+		assert.equal(calls.length, 0, qs);
+	}
 });
 
 // ---------------------------------------------------------------------------

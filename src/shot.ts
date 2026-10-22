@@ -65,6 +65,8 @@ const NEG_TTL = 1_800;
  */
 const EDGE_MIN = 600;
 const EDGE_MAX = 3_600;
+/** 边缘副本过期后，先给旧图、后台再验证的窗口（秒）。 */
+const STALE_WHILE_REVALIDATE = 60;
 /** 边缘上源站报错时，继续用旧副本的窗口（秒）。 */
 const STALE_IF_ERROR = 86_400;
 /** 页面加载完成的判定条件。 */
@@ -230,8 +232,10 @@ async function persist(
 			// 不传 expirationTtl → 永不过期。
 			env.SHOTS.put(lastKey(host), bytes),
 		]);
-	} catch {
-		// 写失败（比如 KV 自己的 1 次/秒写限制）不影响这次响应。
+	} catch (error) {
+		// 写失败（比如 KV 自己的 1 次/秒写限制）不影响这次响应，
+		// 但要留痕迹，否则永远不知道缓存没写进去。
+		console.warn("kv persist failed", error);
 	}
 }
 
@@ -249,7 +253,7 @@ function image(
 ): Response {
 	const headers = new Headers({
 		"Content-Type": CONTENT_TYPE,
-		"Cache-Control": `public, max-age=${edgeMaxAge()}, stale-if-error=${STALE_IF_ERROR}`,
+		"Cache-Control": `public, max-age=${edgeMaxAge()}, stale-while-revalidate=${STALE_WHILE_REVALIDATE}, stale-if-error=${STALE_IF_ERROR}`,
 		"Cache-Tag": `shot, shot:${host}`,
 		"X-Cache": cache,
 	});
